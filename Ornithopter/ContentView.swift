@@ -80,13 +80,13 @@ struct ContentView: View {
                 EmptySelectionView(addAction: addProfile)
             }
         }
-        .frame(minWidth: 760, minHeight: 620)
+        .frame(minWidth: 800, minHeight: 500)
         .background(
             WindowSizeConfigurator(
                 initialWidth: 820,
-                initialHeight: 700,
-                minimumWidth: 760,
-                minimumHeight: 620
+                initialHeight: 750,
+                minimumWidth: 800,
+                minimumHeight: 500
             )
         )
         .toolbar {
