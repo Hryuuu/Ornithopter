@@ -1548,7 +1548,7 @@ struct RemoteFolderBrowser: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Explorer")
+                Text("Files")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
 
@@ -1566,7 +1566,7 @@ struct RemoteFolderBrowser: View {
                     Image(systemName: "sidebar.leading")
                 }
                 .buttonStyle(.borderless)
-                .help("Hide Explorer")
+                .help("Hide Files")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -1656,6 +1656,14 @@ private struct RemoteFileTreeRow: View {
         AppPreferences.isTextEditableFile(item, patternsValue: supportedTextFilePatterns)
     }
 
+    private var itemIconName: String {
+        if item.isDirectory {
+            return "folder.fill"
+        }
+
+        return isEditableTextFile ? "doc.text" : "doc"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
@@ -1669,7 +1677,7 @@ private struct RemoteFileTreeRow: View {
                         .frame(width: 10, height: 10)
                 }
 
-                Image(systemName: item.isDirectory ? "folder.fill" : "doc")
+                Image(systemName: itemIconName)
                     .foregroundStyle(item.isDirectory ? .blue : .secondary)
                     .frame(width: 16)
                     .opacity(item.isHidden ? 0.58 : 1)

@@ -5,6 +5,7 @@
 //  Created by 류한서 on 6/18/26.
 //
 
+import AppKit
 import SwiftUI
 
 @main
@@ -14,7 +15,32 @@ struct OrnithopterApp: App {
             ContentView()
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 820, height: 750)
+        .defaultSize(width: 820, height: 790)
+        .commands {
+            CommandGroup(replacing: .pasteboard) {
+                Button("Cut") {
+                    NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("x")
+
+                Button("Copy") {
+                    NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("c")
+
+                Button("Paste") {
+                    NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("v")
+
+                Divider()
+
+                Button("Select All") {
+                    NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("a")
+            }
+        }
 
         Settings {
             OrnithopterSettingsView()
@@ -25,6 +51,7 @@ struct OrnithopterApp: App {
 enum AppPreferenceDefaults {
     static let textEditor = "vi"
     static let customTextEditor = ""
+    static let defaultIdentityFile = ""
     static let supportedTextFilePatterns = [
         "*.txt",
         "*.md",
@@ -113,6 +140,7 @@ enum AppPreferences {
 private struct OrnithopterSettingsView: View {
     @AppStorage("defaultTextEditor") private var defaultTextEditor = AppPreferenceDefaults.textEditor
     @AppStorage("customTextEditor") private var customTextEditor = AppPreferenceDefaults.customTextEditor
+    @AppStorage("defaultIdentityFile") private var defaultIdentityFile = AppPreferenceDefaults.defaultIdentityFile
     @AppStorage("supportedTextFilePatterns") private var supportedTextFilePatterns = AppPreferenceDefaults.supportedTextFilePatterns
 
     var body: some View {
@@ -136,6 +164,18 @@ private struct OrnithopterSettingsView: View {
             }
 
             Section {
+                TextField("Default identity file", text: $defaultIdentityFile)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+
+                Text("Used as the Identity file value when creating a new server.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("New server defaults")
+            }
+
+            Section {
                 TextEditor(text: $supportedTextFilePatterns)
                     .font(.system(.body, design: .monospaced))
                     .frame(minHeight: 120)
@@ -148,9 +188,26 @@ private struct OrnithopterSettingsView: View {
             } header: {
                 Text("Supported file formats")
             }
+
+            Section {
+                HStack {
+                    Spacer()
+
+                    Button("Reset Settings", role: .destructive) {
+                        resetSettings()
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .padding(20)
-        .frame(width: 520, height: 380)
+        .frame(width: 540, height: 540)
+    }
+
+    private func resetSettings() {
+        defaultTextEditor = AppPreferenceDefaults.textEditor
+        customTextEditor = AppPreferenceDefaults.customTextEditor
+        defaultIdentityFile = AppPreferenceDefaults.defaultIdentityFile
+        supportedTextFilePatterns = AppPreferenceDefaults.supportedTextFilePatterns
     }
 }

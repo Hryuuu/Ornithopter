@@ -84,7 +84,7 @@ struct ContentView: View {
         .background(
             WindowSizeConfigurator(
                 initialWidth: 820,
-                initialHeight: 750,
+                initialHeight: 790,
                 minimumWidth: 800,
                 minimumHeight: 500
             )
@@ -262,6 +262,13 @@ private struct ServerDetailView: View {
         canConnect
     }
 
+    private var showsFileBrowser: Binding<Bool> {
+        Binding(
+            get: { !profile.disableExplorer },
+            set: { profile.disableExplorer = !$0 }
+        )
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -324,6 +331,8 @@ private struct ServerDetailView: View {
                             .help("Off uses -X. On uses -Y.")
 
                         SettingsToggleRow(isOn: $profile.hideHiddenFiles, title: "Hide hidden files", systemImage: "eye.slash")
+
+                        SettingsToggleRow(isOn: showsFileBrowser, title: "Show file browser", systemImage: "folder")
                     }
                     .padding(4)
                 } label: {

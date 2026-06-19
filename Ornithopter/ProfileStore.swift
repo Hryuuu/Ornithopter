@@ -26,10 +26,15 @@ final class ProfileStore: ObservableObject {
     }
 
     func addProfile() -> ServerProfile {
+        let defaultIdentityFile = UserDefaults.standard
+            .string(forKey: "defaultIdentityFile")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? AppPreferenceDefaults.defaultIdentityFile
+
         let profile = ServerProfile(
             name: nextNewServerName(),
             host: "",
             username: "",
+            identityFile: defaultIdentityFile,
             passwordAuthentication: true,
             savePasswordInKeychain: true,
             x11Forwarding: false

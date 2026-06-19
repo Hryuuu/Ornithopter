@@ -18,6 +18,7 @@ struct ServerProfile: Identifiable, Codable, Equatable {
     var x11Forwarding: Bool
     var x11TrustedForwarding: Bool
     var hideHiddenFiles: Bool
+    var disableExplorer: Bool
     var lastConnectedAt: Date?
     var tags: [String]
     var notes: String
@@ -35,6 +36,7 @@ struct ServerProfile: Identifiable, Codable, Equatable {
         x11Forwarding: Bool = false,
         x11TrustedForwarding: Bool = false,
         hideHiddenFiles: Bool = false,
+        disableExplorer: Bool = false,
         lastConnectedAt: Date? = nil,
         tags: [String] = [],
         notes: String = ""
@@ -51,6 +53,7 @@ struct ServerProfile: Identifiable, Codable, Equatable {
         self.x11Forwarding = x11Forwarding
         self.x11TrustedForwarding = x11TrustedForwarding
         self.hideHiddenFiles = hideHiddenFiles
+        self.disableExplorer = disableExplorer
         self.lastConnectedAt = lastConnectedAt
         self.tags = tags
         self.notes = notes
@@ -69,6 +72,7 @@ struct ServerProfile: Identifiable, Codable, Equatable {
         case x11Forwarding
         case x11TrustedForwarding
         case hideHiddenFiles
+        case disableExplorer
         case lastConnectedAt
         case tags
         case notes
@@ -88,6 +92,7 @@ struct ServerProfile: Identifiable, Codable, Equatable {
         x11Forwarding = try container.decodeIfPresent(Bool.self, forKey: .x11Forwarding) ?? false
         x11TrustedForwarding = try container.decodeIfPresent(Bool.self, forKey: .x11TrustedForwarding) ?? false
         hideHiddenFiles = try container.decodeIfPresent(Bool.self, forKey: .hideHiddenFiles) ?? false
+        disableExplorer = try container.decodeIfPresent(Bool.self, forKey: .disableExplorer) ?? false
         lastConnectedAt = try container.decodeIfPresent(Date.self, forKey: .lastConnectedAt)
         tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
         notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""

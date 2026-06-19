@@ -56,36 +56,38 @@ struct ConnectionWindowView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            if isExplorerVisible {
-                RemoteFolderBrowser(
-                    profile: profile,
-                    sessionPassword: sessionPassword,
-                    collapseAction: {
-                        isExplorerVisible = false
-                    },
-                    editAction: { item in
-                        openRemoteFileInEditor(item)
-                    }
-                )
-                .frame(width: 240)
-            } else {
-                VStack {
-                    Button {
-                        isExplorerVisible = true
-                    } label: {
-                        Image(systemName: "sidebar.leading")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Show Explorer")
+            if !profile.disableExplorer {
+                if isExplorerVisible {
+                    RemoteFolderBrowser(
+                        profile: profile,
+                        sessionPassword: sessionPassword,
+                        collapseAction: {
+                            isExplorerVisible = false
+                        },
+                        editAction: { item in
+                            openRemoteFileInEditor(item)
+                        }
+                    )
+                    .frame(width: 240)
+                } else {
+                    VStack {
+                        Button {
+                            isExplorerVisible = true
+                        } label: {
+                            Image(systemName: "sidebar.leading")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Show Files")
 
-                    Spacer()
+                        Spacer()
+                    }
+                    .padding(.top, 8)
+                    .frame(width: 32)
+                    .background(Color(nsColor: .controlBackgroundColor))
                 }
-                .padding(.top, 8)
-                .frame(width: 32)
-                .background(Color(nsColor: .controlBackgroundColor))
-            }
 
-            Divider()
+                Divider()
+            }
 
             TerminalLayoutView(
                 profile: profile,
