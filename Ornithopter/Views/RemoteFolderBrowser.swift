@@ -230,8 +230,12 @@ final class RemoteFileStore: ObservableObject {
                 selectedPaths.insert(item.path)
             }
         } else {
-            selectedPaths = [item.path]
+            selectedPaths.removeAll()
         }
+    }
+
+    func clearSelection() {
+        selectedPaths.removeAll()
     }
 
     func actionItems(for item: RemoteFileItem) -> [RemoteFileItem] {
@@ -240,6 +244,15 @@ final class RemoteFileStore: ObservableObject {
             if !selected.isEmpty {
                 return selected
             }
+        }
+
+        return [item]
+    }
+
+    func dragItems(for item: RemoteFileItem) -> [RemoteFileItem] {
+        let items = actionItems(for: item)
+        if items.contains(where: { $0.path == item.path }) {
+            return items
         }
 
         return [item]
@@ -506,15 +519,13 @@ final class RemoteFileStore: ObservableObject {
 
     func dragItemProvider(for item: RemoteFileItem) -> NSItemProvider {
         let provider = NSItemProvider()
-        provider.suggestedName = Self.dragSuggestedName(for: item)
-        let items = actionItems(for: item)
+        let items = dragItems(for: item)
+        provider.suggestedName = Self.dragSuggestedName(for: items, draggedItem: item)
         draggedRemoteItems = items
         Self.sharedDragContext = RemoteDragContext(profile: profile, sessionPassword: sessionPassword, items: items)
         clearDraggedRemoteItemLater(item)
 
-        let typeIdentifier = item.isDirectory
-            ? UTType.folder.identifier
-            : UTType(filenameExtension: (item.name as NSString).pathExtension)?.identifier ?? UTType.data.identifier
+        let typeIdentifier = Self.dragTypeIdentifier(for: items, draggedItem: item)
 
         provider.registerFileRepresentation(
             forTypeIdentifier: typeIdentifier,
@@ -524,10 +535,10 @@ final class RemoteFileStore: ObservableObject {
             let progress = Progress(totalUnitCount: 1)
 
             Task.detached {
-                let destination = Self.temporaryDragDestination(for: item)
+                let destination = Self.temporaryDragDestination(for: items, draggedItem: item)
                 try? FileManager.default.removeItem(at: destination)
 
-                let result = Self.downloadItem(item, to: destination, profile: profile, password: sessionPassword)
+                let result = Self.downloadDragItems(items, to: destination, profile: profile, password: sessionPassword)
 
                 switch result {
                 case .success:
@@ -955,6 +966,24 @@ final class RemoteFileStore: ObservableObject {
         return runSFTPCommands(commands, profile: profile, password: password, fallbackMessage: "SFTP download failed")
     }
 
+    private nonisolated static func downloadDragItems(_ items: [RemoteFileItem], to destination: URL, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
+        guard items.count > 1 else {
+            guard let item = items.first else {
+                return .failure(RemoteFileError(message: localized("Nothing to download")))
+            }
+
+            return downloadItem(item, to: destination, profile: profile, password: password)
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        } catch {
+            return .failure(RemoteFileError(message: error.localizedDescription))
+        }
+
+        return downloadItems(items, toDirectory: destination, profile: profile, password: password)
+    }
+
     private nonisolated static func uploadItems(_ urls: [URL], to remoteDirectory: String, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
         let commands = urls.map { url in
             let remoteTarget = joined(remoteDirectory, url.lastPathComponent)
@@ -1228,12 +1257,33 @@ final class RemoteFileStore: ObservableObject {
         return baseName.isEmpty ? item.name : baseName
     }
 
-    private nonisolated static func temporaryDragDestination(for item: RemoteFileItem) -> URL {
+    private nonisolated static func dragSuggestedName(for items: [RemoteFileItem], draggedItem: RemoteFileItem) -> String {
+        guard items.count > 1 else {
+            return dragSuggestedName(for: draggedItem)
+        }
+
+        return "Ornithopter Selection"
+    }
+
+    private nonisolated static func dragTypeIdentifier(for items: [RemoteFileItem], draggedItem: RemoteFileItem) -> String {
+        if items.count > 1 || draggedItem.isDirectory {
+            return UTType.folder.identifier
+        }
+
+        return UTType(filenameExtension: (draggedItem.name as NSString).pathExtension)?.identifier ?? UTType.data.identifier
+    }
+
+    private nonisolated static func temporaryDragDestination(for items: [RemoteFileItem], draggedItem: RemoteFileItem) -> URL {
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("OrnithopterDragDownloads", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        return folder.appendingPathComponent(item.name, isDirectory: item.isDirectory)
+
+        guard items.count > 1 else {
+            return folder.appendingPathComponent(draggedItem.name, isDirectory: draggedItem.isDirectory)
+        }
+
+        return folder.appendingPathComponent("Ornithopter Selection", isDirectory: true)
     }
 
     private nonisolated static func sftpEnvironment(password: String?) -> [String: String] {
@@ -1629,8 +1679,18 @@ struct RemoteFolderBrowser: View {
                         .fill(isDropTarget ? Color.accentColor.opacity(0.14) : Color.clear)
                 )
             }
+            .background(
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        store.clearSelection()
+                    }
+            )
             .onDrop(of: RemoteFileStore.acceptedDropTypes, isTargeted: $isDropTarget) { providers in
                 store.handleDropProviders(providers, to: store.currentPath)
+            }
+            .onExitCommand {
+                store.clearSelection()
             }
             .contextMenu {
                 Button {
@@ -1663,10 +1723,59 @@ struct RemoteFolderBrowser: View {
                 .padding(10)
         }
         .frame(minWidth: 220)
+        .background(EscapeKeyHandler(action: store.clearSelection))
         .task {
             store.refresh()
             await store.refreshAfterDelay(seconds: 3)
             await store.refreshAfterDelay(seconds: 7)
+        }
+    }
+}
+
+private struct EscapeKeyHandler: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> EscapeKeyHandlerView {
+        let view = EscapeKeyHandlerView()
+        view.action = action
+        return view
+    }
+
+    func updateNSView(_ nsView: EscapeKeyHandlerView, context: Context) {
+        nsView.action = action
+    }
+}
+
+private final class EscapeKeyHandlerView: NSView {
+    var action: () -> Void = {}
+    private var monitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        installMonitorIfNeeded()
+    }
+
+    deinit {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+
+    private func installMonitorIfNeeded() {
+        guard monitor == nil else {
+            return
+        }
+
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else {
+                return event
+            }
+
+            if event.keyCode == 53, self.window?.isKeyWindow == true {
+                self.action()
+            }
+
+            return event
         }
     }
 }
@@ -1903,11 +2012,11 @@ private struct RemoteFileTreeRow: View {
         }
 
         if store.isSelected(item) {
-            return Color.accentColor.opacity(0.22)
+            return Color.accentColor.opacity(0.28)
         }
 
         if isHovering {
-            return Color.accentColor.opacity(0.16)
+            return Color.primary.opacity(0.08)
         }
 
         return .clear

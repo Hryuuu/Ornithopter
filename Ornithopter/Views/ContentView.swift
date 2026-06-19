@@ -204,29 +204,21 @@ private struct ServerRow: View {
     let profile: ServerProfile
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(profile.displayName)
-                    .font(.headline)
+                    .font(.system(size: 15, weight: .semibold))
                     .lineLimit(1)
-                Spacer()
-                if profile.port != 22 {
-                    Text(verbatim: String(profile.port))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+                    .layoutPriority(1)
 
-            if profile.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("Host not set")
-                    .font(.subheadline)
+                Spacer(minLength: 8)
+
+                Text(verbatim: connectionSummary)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-            } else {
-                Text(profile.destination)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 150, alignment: .trailing)
             }
 
             if !profile.tags.isEmpty {
@@ -242,6 +234,12 @@ private struct ServerRow: View {
             }
         }
         .padding(.vertical, 6)
+    }
+
+    private var connectionSummary: String {
+        profile.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? NSLocalizedString("Host not set", comment: "")
+            : profile.destination
     }
 }
 
@@ -287,7 +285,7 @@ private struct ServerDetailView: View {
                             }
                         }
 
-                        TextField("SSH key file", text: $profile.identityFile)
+                        TextField("SSH key file (optional)", text: $profile.identityFile)
                     }
                     .textFieldStyle(.roundedBorder)
                     .padding(4)

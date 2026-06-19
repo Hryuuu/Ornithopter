@@ -60,7 +60,7 @@ private enum AboutPanel {
         paragraphStyle.alignment = .center
 
         let description = NSLocalizedString(
-            "Simple SSH client for managing terminal sessions and remote files.",
+            "A simple SSH client.",
             comment: "About panel app description"
         )
         let credits = NSAttributedString(
@@ -171,66 +171,89 @@ private struct OrnithopterSettingsView: View {
     @AppStorage("supportedTextFilePatterns") private var supportedTextFilePatterns = AppPreferenceDefaults.supportedTextFilePatterns
 
     var body: some View {
-        Form {
-            Section {
-                Picker("Default text editor", selection: $defaultTextEditor) {
-                    Text("vi").tag("vi")
-                    Text("vim").tag("vim")
-                    Text("nano").tag("nano")
-                    Text("emacs").tag("emacs")
-                    Text("micro").tag("micro")
-                    Text("Custom...").tag("custom")
-                }
-                .pickerStyle(.menu)
+        VStack(alignment: .leading, spacing: 16) {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .center, spacing: 12) {
+                        Text("Default text editor")
 
-                if defaultTextEditor == "custom" {
-                    TextField("Editor command", text: $customTextEditor)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
+                        Spacer()
+
+                        Picker("", selection: $defaultTextEditor) {
+                            Text("vi").tag("vi")
+                            Text("vim").tag("vim")
+                            Text("nano").tag("nano")
+                            Text("emacs").tag("emacs")
+                            Text("micro").tag("micro")
+                            Text("Custom...").tag("custom")
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(width: 220, alignment: .trailing)
+                    }
+
+                    if defaultTextEditor == "custom" {
+                        TextField("Editor command", text: $customTextEditor)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                    }
                 }
+                .padding(4)
+            } label: {
+                Label("Default text editor", systemImage: "pencil")
             }
 
-            Section {
-                LabeledContent("Default SSH key file (default: empty)") {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Default SSH key file")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
                     TextField("", text: $defaultIdentityFile)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.body, design: .monospaced))
-                }
 
-                Text("Used as the SSH key file value when creating a new server.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("New server defaults")
+                    Text("Used as the initial SSH key file value when creating a new server.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(4)
+            } label: {
+                Label("New server defaults", systemImage: "key")
             }
 
-            Section {
-                TextEditor(text: $supportedTextFilePatterns)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 120)
-                    .scrollContentBackground(.hidden)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextEditor(text: $supportedTextFilePatterns)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(minHeight: 120)
+                        .scrollContentBackground(.hidden)
+                        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
 
-                Text("Use comma-separated patterns, such as *.txt, *.md, *.py.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("Supported file formats")
+                    Text("Use comma-separated patterns, such as *.txt, *.md, *.py.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(4)
+            } label: {
+                Label("Supported file formats", systemImage: "doc.text")
             }
 
-            Section {
-                HStack {
-                    Spacer()
+            HStack {
+                Spacer()
 
-                    Button("Reset Settings", role: .destructive) {
-                        resetSettings()
-                    }
+                Button(role: .destructive) {
+                    resetSettings()
+                } label: {
+                    Label("Reset Settings", systemImage: "arrow.counterclockwise")
                 }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
             }
         }
-        .formStyle(.grouped)
-        .padding(20)
-        .frame(width: 540, height: 540)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 20)
+        .frame(width: 500)
     }
 
     private func resetSettings() {
