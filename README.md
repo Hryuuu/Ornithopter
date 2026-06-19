@@ -1,25 +1,28 @@
 # Ornithopter
 
-Ornithopter is a macOS SwiftUI app for managing SSH connection profiles and launching common SSH/SCP workflows from one place.
+Ornithopter is a simple, free SSH client for macOS, built to provide a lightweight terminal-focused workflow with X11 forwarding support.
 
-## Current Scope
+The goal is to make it easy to keep SSH connections in one place, open remote terminals quickly, and work with remote files without leaving the app.
 
-- Store SSH profiles locally with host, username, port, identity file, remote path, tags, and notes.
-- Search and edit saved profiles in a split-view macOS interface.
-- Generate `ssh` and `scp` commands.
-- Open generated commands in Terminal.app or copy them to the clipboard.
+## Features
 
-Passwords are intentionally not stored. Prefer SSH keys and macOS Keychain for future credential-related features.
+- Manage SSH server profiles with host, username, port, notes, and tags.
+- Connect with password authentication, SSH key files, or stored Keychain passwords.
+- Open integrated SSH terminal sessions inside the app using SwiftTerm.
+- Use multiple terminal tabs for the same server.
+- Split the terminal area horizontally or vertically.
+- Enable X11 forwarding with `-X` or trusted `-Y` mode per server. Requires XQuartz.
+- Browse remote files over SFTP.
+- Create, rename, delete, copy, paste, upload, and download remote files and folders.
+- Hide or show dotfiles in the remote file browser.
+- Open supported text files in a new terminal tab with a configurable terminal editor.
+- Configure default editor, editable file patterns, and default SSH key file.
 
-## Development Notes
+## Notes
 
-- The app is a standard Xcode SwiftUI macOS project.
-- Source files live in `Ornithopter/`.
-- The Xcode project uses a synchronized root group, so new Swift files in `Ornithopter/` are picked up by the target.
-- CLI type checking can be run with:
+- Server profiles are stored locally on the user's Mac.
+- Passwords are stored in macOS Keychain when the save-password option is enabled.
 
-```sh
-swiftc -module-cache-path /private/tmp/ornithopter-module-cache -typecheck Ornithopter/*.swift
-```
+## Attribution
 
-Full `xcodebuild` verification requires selecting an installed Xcode developer directory, not Command Line Tools.
+This project was written with Codex and reviewed by the hryu.
