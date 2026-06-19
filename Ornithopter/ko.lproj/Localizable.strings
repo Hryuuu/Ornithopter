@@ -152,5 +152,3 @@
 "SFTP download timed out" = "SFTP 다운로드 시간이 초과되었습니다";
 "SFTP list timed out" = "SFTP 목록 조회 시간이 초과되었습니다";
 "%@: timed out" = "%@: 시간이 초과되었습니다";
-"About Ornithopter" = "Ornithopter에 관하여";
-"Simple SSH client for managing terminal sessions and remote files." = "터미널 세션과 원격 파일을 관리하는 간단한 SSH 클라이언트입니다.";
