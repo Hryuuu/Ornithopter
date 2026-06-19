@@ -287,7 +287,7 @@ private struct ServerDetailView: View {
                             }
                         }
 
-                        TextField("Identity file", text: $profile.identityFile)
+                        TextField("Identity file location", text: $profile.identityFile)
                     }
                     .textFieldStyle(.roundedBorder)
                     .padding(4)
@@ -378,10 +378,10 @@ private struct ServerDetailView: View {
     private func confirmDelete() {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Delete \(profile.displayName)?"
-        alert.informativeText = "This server profile will be removed from Ornithopter."
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = String(format: NSLocalizedString("Delete %@?", comment: "Delete server confirmation title"), profile.displayName)
+        alert.informativeText = NSLocalizedString("This server profile will be removed from Ornithopter.", comment: "Delete server confirmation message")
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: "Delete confirmation button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel button"))
 
         guard alert.runModal() == .alertFirstButtonReturn else {
             return
@@ -402,7 +402,7 @@ private struct ServerDetailView: View {
 
 private struct SettingsToggleRow: View {
     @Binding var isOn: Bool
-    let title: String
+    let title: LocalizedStringKey
     let systemImage: String
 
     var body: some View {
@@ -414,10 +414,10 @@ private struct SettingsToggleRow: View {
 }
 
 private struct SettingsToggleLabel: View {
-    let title: String
+    let title: LocalizedStringKey
     let systemImage: String
 
-    init(_ title: String, systemImage: String) {
+    init(_ title: LocalizedStringKey, systemImage: String) {
         self.title = title
         self.systemImage = systemImage
     }

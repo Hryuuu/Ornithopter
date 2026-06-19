@@ -99,9 +99,9 @@ enum SSHPasswordPrompter {
         }
 
         guard let result = requestPassword(
-            title: "Password for \(profile.displayName)",
-            message: "Enter the SSH password for \(profile.destination).",
-            confirmTitle: "Connect",
+            title: String(format: NSLocalizedString("Password for %@", comment: "SSH password prompt title"), profile.displayName),
+            message: String(format: NSLocalizedString("Enter the SSH password for %@.", comment: "SSH password prompt message"), profile.destination),
+            confirmTitle: NSLocalizedString("Connect", comment: "Connect button"),
             allowSaving: true,
             saveByDefault: profile.savePasswordInKeychain
         ) else {
@@ -120,11 +120,15 @@ enum SSHPasswordPrompter {
         let isUpdating = SSHPasswordKeychain.hasPassword(for: profile)
 
         guard let result = requestPassword(
-            title: isUpdating ? "Update Password" : "Save Password",
+            title: isUpdating
+                ? NSLocalizedString("Update Password", comment: "Update password prompt title")
+                : NSLocalizedString("Save Password", comment: "Save password prompt title"),
             message: isUpdating
-                ? "Enter a new SSH password to update the saved Keychain item."
-                : "Enter the SSH password to store in macOS Keychain.",
-            confirmTitle: isUpdating ? "Update" : "Save",
+                ? NSLocalizedString("Enter a new SSH password to update the saved Keychain item.", comment: "Update keychain password message")
+                : NSLocalizedString("Enter the SSH password to store in macOS Keychain.", comment: "Save keychain password message"),
+            confirmTitle: isUpdating
+                ? NSLocalizedString("Update", comment: "Update button")
+                : NSLocalizedString("Save", comment: "Save button"),
             allowSaving: false,
             saveByDefault: true
         ) else {
@@ -146,7 +150,7 @@ enum SSHPasswordPrompter {
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: confirmTitle)
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel button"))
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -154,10 +158,14 @@ enum SSHPasswordPrompter {
         stack.frame = NSRect(x: 0, y: 0, width: 300, height: allowSaving ? 58 : 28)
 
         let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        passwordField.placeholderString = "Password"
+        passwordField.placeholderString = NSLocalizedString("Password", comment: "Password field placeholder")
         stack.addArrangedSubview(passwordField)
 
-        let saveButton = NSButton(checkboxWithTitle: "Save in Keychain", target: nil, action: nil)
+        let saveButton = NSButton(
+            checkboxWithTitle: NSLocalizedString("Save in Keychain", comment: "Save password in Keychain checkbox"),
+            target: nil,
+            action: nil
+        )
         if allowSaving {
             saveButton.state = saveByDefault ? .on : .off
             stack.addArrangedSubview(saveButton)

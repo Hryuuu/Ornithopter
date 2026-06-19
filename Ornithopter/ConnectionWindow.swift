@@ -122,10 +122,13 @@ struct ConnectionWindowView: View {
     private func confirmReconnect(status: Int32) -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "SSH connection closed"
-        alert.informativeText = "The session ended unexpectedly with status \(status)."
-        alert.addButton(withTitle: "Reconnect")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = NSLocalizedString("SSH connection closed", comment: "SSH reconnect alert title")
+        alert.informativeText = String(
+            format: NSLocalizedString("The session ended unexpectedly with status %d.", comment: "SSH reconnect alert message"),
+            status
+        )
+        alert.addButton(withTitle: NSLocalizedString("Reconnect", comment: "Reconnect button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel button"))
 
         return alert.runModal() == .alertFirstButtonReturn
     }

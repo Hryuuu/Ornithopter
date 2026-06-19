@@ -17,6 +17,12 @@ struct OrnithopterApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 820, height: 790)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Ornithopter") {
+                    AboutPanel.show()
+                }
+            }
+
             CommandGroup(replacing: .pasteboard) {
                 Button("Cut") {
                     NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil)
@@ -45,6 +51,27 @@ struct OrnithopterApp: App {
         Settings {
             OrnithopterSettingsView()
         }
+    }
+}
+
+private enum AboutPanel {
+    static func show() {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+
+        let description = NSLocalizedString(
+            "Simple SSH client for managing terminal sessions and remote files.",
+            comment: "About panel app description"
+        )
+        let credits = NSAttributedString(
+            string: description,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                .paragraphStyle: paragraphStyle
+            ]
+        )
+
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
     }
 }
 
@@ -164,11 +191,13 @@ private struct OrnithopterSettingsView: View {
             }
 
             Section {
-                TextField("Default identity file", text: $defaultIdentityFile)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
+                LabeledContent("Default identity file location") {
+                    TextField("", text: $defaultIdentityFile)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
 
-                Text("Used as the Identity file value when creating a new server.")
+                Text("Used as the Identity file location value when creating a new server.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {

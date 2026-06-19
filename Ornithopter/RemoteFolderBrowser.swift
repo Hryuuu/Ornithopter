@@ -60,7 +60,7 @@ final class RemoteFileStore: ObservableObject {
     @Published private(set) var selectedPaths: Set<String> = []
     @Published private(set) var copiedItems: [RemoteFileItem] = []
     @Published private(set) var newFolderParent: String?
-    @Published private(set) var status = "Not loaded"
+    @Published private(set) var status = NSLocalizedString("Not loaded", comment: "")
 
     static let acceptedDropTypes: [UTType] = [.item, .fileURL]
     private static var sharedDragContext: RemoteDragContext?
@@ -68,6 +68,14 @@ final class RemoteFileStore: ObservableObject {
     private let profile: ServerProfile
     private let sessionPassword: String?
     private var draggedRemoteItems: [RemoteFileItem] = []
+
+    private nonisolated static func localized(_ key: String) -> String {
+        NSLocalizedString(key, comment: "")
+    }
+
+    private nonisolated static func localizedFormat(_ key: String, _ arguments: CVarArg...) -> String {
+        String(format: NSLocalizedString(key, comment: ""), arguments: arguments)
+    }
 
     init(profile: ServerProfile, sessionPassword: String?) {
         self.profile = profile
@@ -92,7 +100,7 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private func load(path: String, updateCurrentPath: Bool, resetTree: Bool) {
-        status = "Loading..."
+        status = Self.localized("Loading...")
         if resetTree {
             expandedPaths.removeAll()
             childrenByPath.removeAll()
@@ -110,7 +118,9 @@ final class RemoteFileStore: ObservableObject {
                     self.items = items
                     self.childrenByPath[path] = items
                     let visibleCount = self.visibleItems(items).count
-                    self.status = visibleCount == 0 ? "Empty folder" : "\(visibleCount) items"
+                    self.status = visibleCount == 0
+                        ? Self.localized("Empty folder")
+                        : Self.localizedFormat("%d items", visibleCount)
                 case .failure(let error):
                     if !updateCurrentPath {
                         self.items = []
@@ -241,24 +251,28 @@ final class RemoteFileStore: ObservableObject {
 
     func copy(_ items: [RemoteFileItem]) {
         copiedItems = uniqueItems(items)
-        status = copiedItems.count == 1 ? "Copied \(copiedItems[0].name)" : "Copied \(copiedItems.count) items"
+        status = copiedItems.count == 1
+            ? Self.localizedFormat("Copied %@", copiedItems[0].name)
+            : Self.localizedFormat("Copied %d items", copiedItems.count)
     }
 
     func paste(to remoteDirectory: String) {
         let itemsToPaste = copiedItems
         guard !itemsToPaste.isEmpty else {
-            status = "Nothing to paste"
+            status = Self.localized("Nothing to paste")
             return
         }
 
         let destinationDirectory = remoteDirectory
         if itemsToPaste.contains(where: { $0.isDirectory && (destinationDirectory == $0.path || destinationDirectory.hasPrefix($0.path + "/")) }) {
-            status = "Cannot copy a folder into itself."
+            status = Self.localized("Cannot copy a folder into itself.")
             return
         }
 
         uploadingPaths.insert(destinationDirectory)
-        status = itemsToPaste.count == 1 ? "Copying \(itemsToPaste[0].name)..." : "Copying \(itemsToPaste.count) items..."
+        status = itemsToPaste.count == 1
+            ? Self.localizedFormat("Copying %@...", itemsToPaste[0].name)
+            : Self.localizedFormat("Copying %d items...", itemsToPaste.count)
 
         Task.detached { [profile, sessionPassword] in
             let result: Result<Void, RemoteFileError>
@@ -266,9 +280,9 @@ final class RemoteFileStore: ObservableObject {
             case .success(let remoteItems):
                 let copiedNames = itemsToPaste.map(\.name)
                 if let duplicateName = Self.firstDuplicateName(copiedNames) {
-                    result = .failure(RemoteFileError(message: "Multiple copied items are named \(duplicateName)."))
+                    result = .failure(RemoteFileError(message: Self.localizedFormat("Multiple copied items are named %@.", duplicateName)))
                 } else if let existingName = copiedNames.first(where: { name in remoteItems.contains { $0.name == name } }) {
-                    result = .failure(RemoteFileError(message: "An item named \(existingName) already exists."))
+                    result = .failure(RemoteFileError(message: Self.localizedFormat("An item named %@ already exists.", existingName)))
                 } else {
                     result = Self.copyItems(itemsToPaste, to: destinationDirectory, profile: profile, password: sessionPassword)
                 }
@@ -281,7 +295,9 @@ final class RemoteFileStore: ObservableObject {
 
                 switch result {
                 case .success:
-                    self.status = itemsToPaste.count == 1 ? "Pasted \(itemsToPaste[0].name)" : "Pasted \(itemsToPaste.count) items"
+                    self.status = itemsToPaste.count == 1
+                        ? Self.localizedFormat("Pasted %@", itemsToPaste[0].name)
+                        : Self.localizedFormat("Pasted %d items", itemsToPaste.count)
                     self.reloadAfterUpload(to: destinationDirectory)
                 case .failure(let error):
                     self.status = "\(destinationDirectory): \(error.localizedDescription)"
@@ -310,19 +326,19 @@ final class RemoteFileStore: ObservableObject {
     func createFolder(named proposedName: String, in remoteDirectory: String) -> Bool {
         let validation = validateName(proposedName, in: remoteDirectory, excluding: nil)
         guard validation.isValid, let name = validation.name else {
-            status = validation.message ?? "Invalid folder name"
+            status = validation.message ?? Self.localized("Invalid folder name")
             return false
         }
 
         uploadingPaths.insert(remoteDirectory)
-        status = "Creating \(name)..."
+        status = Self.localizedFormat("Creating %@...", name)
 
         Task.detached { [profile, sessionPassword] in
             let result: Result<Void, RemoteFileError>
             switch Self.loadDirectory(profile: profile, path: remoteDirectory, password: sessionPassword) {
             case .success(let remoteItems):
                 if remoteItems.contains(where: { $0.name == name }) {
-                    result = .failure(RemoteFileError(message: "An item named \(name) already exists."))
+                    result = .failure(RemoteFileError(message: Self.localizedFormat("An item named %@ already exists.", name)))
                 } else {
                     let newPath = Self.joined(remoteDirectory, name)
                     result = Self.makeDirectory(newPath, profile: profile, password: sessionPassword)
@@ -339,7 +355,7 @@ final class RemoteFileStore: ObservableObject {
                     if self.newFolderParent == remoteDirectory {
                         self.newFolderParent = nil
                     }
-                    self.status = "Created \(name)"
+                    self.status = Self.localizedFormat("Created %@", name)
                     self.reloadAfterUpload(to: remoteDirectory)
                 case .failure(let error):
                     self.status = "\(name): \(error.localizedDescription)"
@@ -353,7 +369,7 @@ final class RemoteFileStore: ObservableObject {
     func rename(_ item: RemoteFileItem, to proposedName: String) -> Bool {
         let validation = validateName(proposedName, in: Self.parentPath(item.path), excluding: item)
         guard validation.isValid, let newName = validation.name else {
-            status = validation.message ?? "Invalid name"
+            status = validation.message ?? Self.localized("Invalid name")
             return false
         }
 
@@ -362,7 +378,7 @@ final class RemoteFileStore: ObservableObject {
         }
 
         let newPath = Self.joined(Self.parentPath(item.path), newName)
-        status = "Renaming \(item.name)..."
+        status = Self.localizedFormat("Renaming %@...", item.name)
 
         Task.detached { [profile, sessionPassword] in
             let result = Self.renameItem(item, to: newPath, profile: profile, password: sessionPassword)
@@ -370,7 +386,7 @@ final class RemoteFileStore: ObservableObject {
             await MainActor.run {
                 switch result {
                 case .success:
-                    self.status = "Renamed \(item.name) to \(newName)"
+                    self.status = Self.localizedFormat("Renamed %@ to %@", item.name, newName)
                     self.reloadParent(of: item)
                 case .failure(let error):
                     self.status = "\(item.name): \(error.localizedDescription)"
@@ -394,7 +410,9 @@ final class RemoteFileStore: ObservableObject {
         for item in itemsToDelete {
             movingPaths.insert(item.path)
         }
-        status = itemsToDelete.count == 1 ? "Deleting \(itemsToDelete[0].name)..." : "Deleting \(itemsToDelete.count) items..."
+        status = itemsToDelete.count == 1
+            ? Self.localizedFormat("Deleting %@...", itemsToDelete[0].name)
+            : Self.localizedFormat("Deleting %d items...", itemsToDelete.count)
 
         Task.detached { [profile, sessionPassword] in
             let result = Self.deleteItems(itemsToDelete, profile: profile, password: sessionPassword)
@@ -411,7 +429,9 @@ final class RemoteFileStore: ObservableObject {
                         self.childrenByPath.removeValue(forKey: item.path)
                         self.selectedPaths.remove(item.path)
                     }
-                    self.status = itemsToDelete.count == 1 ? "Deleted \(itemsToDelete[0].name)" : "Deleted \(itemsToDelete.count) items"
+                    self.status = itemsToDelete.count == 1
+                        ? Self.localizedFormat("Deleted %@", itemsToDelete[0].name)
+                        : Self.localizedFormat("Deleted %d items", itemsToDelete.count)
                     self.reloadParents(of: itemsToDelete)
                 case .failure(let error):
                     self.status = error.localizedDescription
@@ -436,7 +456,7 @@ final class RemoteFileStore: ObservableObject {
         }
 
         downloadingPaths.insert(item.path)
-        status = "Downloading \(item.name)..."
+        status = Self.localizedFormat("Downloading %@...", item.name)
 
         Task.detached { [profile, sessionPassword] in
             let result = Self.downloadItem(item, to: destination, profile: profile, password: sessionPassword)
@@ -446,7 +466,7 @@ final class RemoteFileStore: ObservableObject {
 
                 switch result {
                 case .success:
-                    self.status = "Downloaded \(item.name)"
+                    self.status = Self.localizedFormat("Downloaded %@", item.name)
                 case .failure(let error):
                     self.status = "\(item.name): \(error.localizedDescription)"
                 }
@@ -464,7 +484,7 @@ final class RemoteFileStore: ObservableObject {
         for item in itemsToDownload {
             downloadingPaths.insert(item.path)
         }
-        status = "Downloading \(itemsToDownload.count) items..."
+        status = Self.localizedFormat("Downloading %d items...", itemsToDownload.count)
 
         Task.detached { [profile, sessionPassword] in
             let result = Self.downloadItems(itemsToDownload, toDirectory: destination, profile: profile, password: sessionPassword)
@@ -476,7 +496,7 @@ final class RemoteFileStore: ObservableObject {
 
                 switch result {
                 case .success:
-                    self.status = "Downloaded \(itemsToDownload.count) items"
+                    self.status = Self.localizedFormat("Downloaded %d items", itemsToDownload.count)
                 case .failure(let error):
                     self.status = error.localizedDescription
                 }
@@ -585,7 +605,9 @@ final class RemoteFileStore: ObservableObject {
         }
 
         uploadingPaths.insert(remoteDirectory)
-        status = itemsToCopy.count == 1 ? "Copying \(itemsToCopy[0].name)..." : "Copying \(itemsToCopy.count) items..."
+        status = itemsToCopy.count == 1
+            ? Self.localizedFormat("Copying %@...", itemsToCopy[0].name)
+            : Self.localizedFormat("Copying %d items...", itemsToCopy.count)
 
         Task.detached { [profile, sessionPassword] in
             let result: Result<Void, RemoteFileError>
@@ -593,9 +615,9 @@ final class RemoteFileStore: ObservableObject {
             case .success(let remoteItems):
                 let itemNames = itemsToCopy.map(\.name)
                 if let duplicateName = Self.firstDuplicateName(itemNames) {
-                    result = .failure(RemoteFileError(message: "Multiple copied items are named \(duplicateName)."))
+                    result = .failure(RemoteFileError(message: Self.localizedFormat("Multiple copied items are named %@.", duplicateName)))
                 } else if let existingName = itemNames.first(where: { name in remoteItems.contains { $0.name == name } }) {
-                    result = .failure(RemoteFileError(message: "An item named \(existingName) already exists."))
+                    result = .failure(RemoteFileError(message: Self.localizedFormat("An item named %@ already exists.", existingName)))
                 } else {
                     result = Self.copyItemsThroughTemporaryDirectory(
                         itemsToCopy,
@@ -615,7 +637,9 @@ final class RemoteFileStore: ObservableObject {
 
                 switch result {
                 case .success:
-                    self.status = itemsToCopy.count == 1 ? "Copied \(itemsToCopy[0].name)" : "Copied \(itemsToCopy.count) items"
+                    self.status = itemsToCopy.count == 1
+                        ? Self.localizedFormat("Copied %@", itemsToCopy[0].name)
+                        : Self.localizedFormat("Copied %d items", itemsToCopy.count)
                     self.reloadAfterUpload(to: remoteDirectory)
                 case .failure(let error):
                     self.status = error.localizedDescription
@@ -636,19 +660,23 @@ final class RemoteFileStore: ObservableObject {
         }
 
         if itemsToMove.allSatisfy({ Self.parentPath($0.path) == destinationDirectory }) {
-            status = itemsToMove.count == 1 ? "\(itemsToMove[0].name) is already in this folder" : "Selected items are already in this folder"
+            status = itemsToMove.count == 1
+                ? Self.localizedFormat("%@ is already in this folder", itemsToMove[0].name)
+                : Self.localized("Selected items are already in this folder")
             return
         }
 
         if itemsToMove.contains(where: { $0.isDirectory && (destinationDirectory == $0.path || destinationDirectory.hasPrefix($0.path + "/")) }) {
-            status = "Cannot move a folder into itself."
+            status = Self.localized("Cannot move a folder into itself.")
             return
         }
 
         for item in itemsToMove {
             movingPaths.insert(item.path)
         }
-        status = itemsToMove.count == 1 ? "Moving \(itemsToMove[0].name)..." : "Moving \(itemsToMove.count) items..."
+        status = itemsToMove.count == 1
+            ? Self.localizedFormat("Moving %@...", itemsToMove[0].name)
+            : Self.localizedFormat("Moving %d items...", itemsToMove.count)
 
         Task.detached { [profile, sessionPassword] in
             let result: Result<Void, RemoteFileError>
@@ -656,9 +684,9 @@ final class RemoteFileStore: ObservableObject {
             case .success(let remoteItems):
                 let itemNames = itemsToMove.map(\.name)
                 if let duplicateName = Self.firstDuplicateName(itemNames) {
-                    result = .failure(RemoteFileError(message: "Multiple selected items are named \(duplicateName)."))
+                    result = .failure(RemoteFileError(message: Self.localizedFormat("Multiple selected items are named %@.", duplicateName)))
                 } else if let existingName = itemNames.first(where: { name in remoteItems.contains { $0.name == name } }) {
-                    result = .failure(RemoteFileError(message: "An item named \(existingName) already exists."))
+                    result = .failure(RemoteFileError(message: Self.localizedFormat("An item named %@ already exists.", existingName)))
                 } else {
                     result = Self.renameItems(itemsToMove, to: destinationDirectory, profile: profile, password: sessionPassword)
                 }
@@ -673,7 +701,9 @@ final class RemoteFileStore: ObservableObject {
 
                 switch result {
                 case .success:
-                    self.status = itemsToMove.count == 1 ? "Moved \(itemsToMove[0].name)" : "Moved \(itemsToMove.count) items"
+                    self.status = itemsToMove.count == 1
+                        ? Self.localizedFormat("Moved %@", itemsToMove[0].name)
+                        : Self.localizedFormat("Moved %d items", itemsToMove.count)
                     self.reloadParents(of: itemsToMove)
                     if self.expandedPaths.contains(destinationDirectory) || destinationDirectory == self.currentPath {
                         self.reloadAfterUpload(to: destinationDirectory)
@@ -693,8 +723,8 @@ final class RemoteFileStore: ObservableObject {
 
         uploadingPaths.insert(remoteDirectory)
         status = urls.count == 1
-            ? "Uploading \(urls[0].lastPathComponent)..."
-            : "Uploading \(urls.count) items..."
+            ? Self.localizedFormat("Uploading %@...", urls[0].lastPathComponent)
+            : Self.localizedFormat("Uploading %d items...", urls.count)
 
         Task.detached { [profile, sessionPassword] in
             let result: Result<Void, RemoteFileError>
@@ -715,8 +745,8 @@ final class RemoteFileStore: ObservableObject {
                 switch result {
                 case .success:
                     self.status = urls.count == 1
-                        ? "Uploaded \(urls[0].lastPathComponent)"
-                        : "Uploaded \(urls.count) items"
+                        ? Self.localizedFormat("Uploaded %@", urls[0].lastPathComponent)
+                        : Self.localizedFormat("Uploaded %d items", urls.count)
                     self.reloadAfterUpload(to: remoteDirectory)
                 case .failure(let error):
                     self.status = "\(remoteDirectory): \(error.localizedDescription)"
@@ -733,7 +763,7 @@ final class RemoteFileStore: ObservableObject {
 
         let siblings = childrenByPath[parentPath] ?? (parentPath == currentPath ? items : [])
         if siblings.contains(where: { $0.path != item?.path && $0.name == name }) {
-            return NameValidation(name: name, message: "An item named \(name) already exists.")
+            return NameValidation(name: name, message: Self.localizedFormat("An item named %@ already exists.", name))
         }
 
         return NameValidation(name: name, message: nil)
@@ -809,7 +839,7 @@ final class RemoteFileStore: ObservableObject {
 
     private func loadChildren(path: String) {
         loadingPaths.insert(path)
-        status = "Loading \(path)..."
+        status = Self.localizedFormat("Loading %@...", path)
 
         Task.detached { [profile, sessionPassword] in
             let result = Self.loadDirectory(profile: profile, path: path, password: sessionPassword)
@@ -821,7 +851,9 @@ final class RemoteFileStore: ObservableObject {
                 case .success(let items):
                     self.childrenByPath[path] = items
                     let visibleCount = self.visibleItems(items).count
-                    self.status = visibleCount == 0 ? "\(path): Empty folder" : "\(path): \(visibleCount) items"
+                    self.status = visibleCount == 0
+                        ? Self.localizedFormat("%@: Empty folder", path)
+                        : Self.localizedFormat("%@: %d items", path, visibleCount)
                 case .failure(let error):
                     self.expandedPaths.remove(path)
                     self.status = "\(path): \(error.localizedDescription)"
@@ -851,7 +883,7 @@ final class RemoteFileStore: ObservableObject {
             try? input.fileHandleForWriting.close()
 
             guard waitForSFTPProcess(process) else {
-                return .failure(RemoteFileError(message: "SFTP timed out"))
+                return .failure(RemoteFileError(message: localized("SFTP timed out")))
             }
 
             let outputText = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
@@ -894,7 +926,7 @@ final class RemoteFileStore: ObservableObject {
             input.fileHandleForWriting.write(Data(commands.utf8))
             try? input.fileHandleForWriting.close()
             guard waitForSFTPProcess(process) else {
-                return .failure(RemoteFileError(message: "SFTP download timed out"))
+                return .failure(RemoteFileError(message: localized("SFTP download timed out")))
             }
 
             let errorText = String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
@@ -988,11 +1020,11 @@ final class RemoteFileStore: ObservableObject {
             }
 
             guard !names.contains(name) else {
-                return NameValidation(name: name, message: "Multiple selected items are named \(name).")
+                return NameValidation(name: name, message: localizedFormat("Multiple selected items are named %@.", name))
             }
 
             guard !existingNames.contains(name) else {
-                return NameValidation(name: name, message: "An item named \(name) already exists.")
+                return NameValidation(name: name, message: localizedFormat("An item named %@ already exists.", name))
             }
 
             names.insert(name)
@@ -1005,15 +1037,15 @@ final class RemoteFileStore: ObservableObject {
         let name = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !name.isEmpty else {
-            return NameValidation(name: nil, message: "Name cannot be empty.")
+            return NameValidation(name: nil, message: localized("Name cannot be empty."))
         }
 
         guard name != "." && name != ".." else {
-            return NameValidation(name: name, message: "\(name) is not allowed.")
+            return NameValidation(name: name, message: localizedFormat("%@ is not allowed.", name))
         }
 
         guard !name.contains("/") && !name.contains("\0") else {
-            return NameValidation(name: name, message: "Name cannot contain / or null characters.")
+            return NameValidation(name: name, message: localized("Name cannot contain / or null characters."))
         }
 
         return NameValidation(name: name, message: nil)
@@ -1126,7 +1158,7 @@ final class RemoteFileStore: ObservableObject {
             input.fileHandleForWriting.write(Data((commands + "\nquit\n").utf8))
             try? input.fileHandleForWriting.close()
             guard waitForSFTPProcess(process) else {
-                return .failure(RemoteFileError(message: "\(fallbackMessage): timed out"))
+                return .failure(RemoteFileError(message: localizedFormat("%@: timed out", fallbackMessage)))
             }
 
             let errorText = String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
@@ -1159,7 +1191,7 @@ final class RemoteFileStore: ObservableObject {
         do {
             try process.run()
             guard waitForSFTPProcess(process) else {
-                return .failure(RemoteFileError(message: "\(fallbackMessage): timed out"))
+                return .failure(RemoteFileError(message: localizedFormat("%@: timed out", fallbackMessage)))
             }
 
             let errorText = String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
@@ -1251,7 +1283,7 @@ final class RemoteFileStore: ObservableObject {
             input.fileHandleForWriting.write(Data(sftpListCommands(for: path, decorated: false).utf8))
             try? input.fileHandleForWriting.close()
             guard waitForSFTPProcess(process) else {
-                return .failure(RemoteFileError(message: "SFTP list timed out"))
+                return .failure(RemoteFileError(message: localized("SFTP list timed out")))
             }
 
             let outputText = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
@@ -1431,14 +1463,14 @@ final class RemoteFileStore: ObservableObject {
 
     private func askDownloadDestination(for item: RemoteFileItem) -> URL? {
         let panel = NSSavePanel()
-        panel.title = "Download \(item.name)"
-        panel.prompt = "Download"
+        panel.title = Self.localizedFormat("Download %@", item.name)
+        panel.prompt = Self.localized("Download")
         panel.nameFieldStringValue = item.name
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.message = item.isDirectory
-            ? "Choose where to save this remote folder."
-            : "Choose where to save this remote file."
+            ? Self.localized("Choose where to save this remote folder.")
+            : Self.localized("Choose where to save this remote file.")
 
         guard panel.runModal() == .OK else {
             return nil
@@ -1449,13 +1481,13 @@ final class RemoteFileStore: ObservableObject {
 
     private func askDownloadDirectory() -> URL? {
         let panel = NSOpenPanel()
-        panel.title = "Download Selected Items"
-        panel.prompt = "Download"
+        panel.title = Self.localized("Download Selected Items")
+        panel.prompt = Self.localized("Download")
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
-        panel.message = "Choose a local folder for the selected remote items."
+        panel.message = Self.localized("Choose a local folder for the selected remote items.")
 
         guard panel.runModal() == .OK else {
             return nil
@@ -1466,13 +1498,13 @@ final class RemoteFileStore: ObservableObject {
 
     private func askUploadSources() -> [URL]? {
         let panel = NSOpenPanel()
-        panel.title = "Upload Files"
-        panel.prompt = "Upload"
+        panel.title = Self.localized("Upload Files")
+        panel.prompt = Self.localized("Upload")
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.canCreateDirectories = false
-        panel.message = "Choose local files or folders to upload."
+        panel.message = Self.localized("Choose local files or folders to upload.")
 
         guard panel.runModal() == .OK else {
             return nil
@@ -1484,12 +1516,12 @@ final class RemoteFileStore: ObservableObject {
     private func confirmDelete(_ item: RemoteFileItem) -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Delete \(item.name)?"
+        alert.messageText = String(format: NSLocalizedString("Delete %@?", comment: "Delete remote item confirmation title"), item.name)
         alert.informativeText = item.isDirectory
-            ? "This will delete the remote folder and its contents."
-            : "This will delete the remote file."
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
+            ? NSLocalizedString("This will delete the remote folder and its contents.", comment: "Delete remote folder message")
+            : NSLocalizedString("This will delete the remote file.", comment: "Delete remote file message")
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: "Delete confirmation button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel button"))
 
         return alert.runModal() == .alertFirstButtonReturn
     }
@@ -1501,10 +1533,13 @@ final class RemoteFileStore: ObservableObject {
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Delete \(items.count) items?"
-        alert.informativeText = "This will delete the selected remote files and folders."
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = String(
+            format: NSLocalizedString("Delete %d items?", comment: "Delete multiple remote items confirmation title"),
+            items.count
+        )
+        alert.informativeText = NSLocalizedString("This will delete the selected remote files and folders.", comment: "Delete multiple remote items message")
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: "Delete confirmation button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel button"))
 
         return alert.runModal() == .alertFirstButtonReturn
     }
