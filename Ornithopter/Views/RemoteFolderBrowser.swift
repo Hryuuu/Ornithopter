@@ -64,10 +64,12 @@ final class RemoteFileStore: ObservableObject {
 
     static let acceptedDropTypes: [UTType] = [.item, .fileURL]
     private static var sharedDragContext: RemoteDragContext?
+    private static let commandSelectionGraceInterval: TimeInterval = 1
 
     private let profile: ServerProfile
     private let sessionPassword: String?
     private var draggedRemoteItems: [RemoteFileItem] = []
+    private var lastCommandSelectionAt: Date?
 
     private nonisolated static func localized(_ key: String) -> String {
         NSLocalizedString(key, comment: "")
@@ -231,11 +233,28 @@ final class RemoteFileStore: ObservableObject {
             }
         } else {
             selectedPaths.removeAll()
+            lastCommandSelectionAt = nil
         }
     }
 
     func clearSelection() {
         selectedPaths.removeAll()
+        lastCommandSelectionAt = nil
+    }
+
+    func shouldExtendSelection(commandPressed: Bool) -> Bool {
+        let now = Date()
+
+        if commandPressed {
+            lastCommandSelectionAt = now
+            return true
+        }
+
+        guard let lastCommandSelectionAt else {
+            return false
+        }
+
+        return now.timeIntervalSince(lastCommandSelectionAt) <= Self.commandSelectionGraceInterval
     }
 
     func actionItems(for item: RemoteFileItem) -> [RemoteFileItem] {
@@ -1900,7 +1919,9 @@ private struct RemoteFileTreeRow: View {
             }
             .onTapGesture {
                 if !isRenaming {
-                    let isExtendingSelection = NSEvent.modifierFlags.contains(.command)
+                    let isExtendingSelection = store.shouldExtendSelection(
+                        commandPressed: NSEvent.modifierFlags.contains(.command)
+                    )
                     store.select(item, extending: isExtendingSelection)
                     if !isExtendingSelection {
                         store.open(item)

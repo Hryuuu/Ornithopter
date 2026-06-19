@@ -1,6 +1,6 @@
 {
   "fill" : {
-    "solid" : "gray:0.24930,1.00000"
+    "automatic-gradient" : "gray:0.25000,1.00000"
   },
   "groups" : [
     {
@@ -14,10 +14,10 @@
           "name" : "mascot",
           "opacity" : 1,
           "position" : {
-            "scale" : 0.1,
+            "scale" : 0.11,
             "translation-in-points" : [
-              260,
-              -242
+              0,
+              240
             ]
           }
         },

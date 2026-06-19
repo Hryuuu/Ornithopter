@@ -118,6 +118,8 @@ struct TerminalTextView: NSViewRepresentable {
         var onTitleChanged: (String) -> Void
         var didStart = false
         var isClosing = false
+        private weak var terminalView: LocalProcessTerminalView?
+        private var keyMonitor: Any?
 
         init(
             profile: ServerProfile,
@@ -136,6 +138,9 @@ struct TerminalTextView: NSViewRepresentable {
         }
 
         func startIfNeeded(_ terminalView: LocalProcessTerminalView) {
+            self.terminalView = terminalView
+            installKeyMonitorIfNeeded()
+
             guard !didStart else {
                 return
             }
@@ -200,6 +205,82 @@ struct TerminalTextView: NSViewRepresentable {
                 ]) { _, new in new }
                 .merging(SSHAskPass.environment(password: sessionPassword)) { _, new in new }
                 .map { "\($0.key)=\($0.value)" }
+        }
+
+        private func installKeyMonitorIfNeeded() {
+            guard keyMonitor == nil else {
+                return
+            }
+
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self,
+                      self.sendControlShortcutIfNeeded(event) else {
+                    return event
+                }
+
+                return nil
+            }
+        }
+
+        private func sendControlShortcutIfNeeded(_ event: NSEvent) -> Bool {
+            guard let terminalView,
+                  terminalView.window?.firstResponder === terminalView else {
+                return false
+            }
+
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard flags.contains(.control),
+                  !flags.contains(.command),
+                  !flags.contains(.option),
+                  let byte = controlByte(for: event) else {
+                return false
+            }
+
+            terminalView.send([byte])
+            return true
+        }
+
+        private func controlByte(for event: NSEvent) -> UInt8? {
+            switch event.keyCode {
+            case 0: return 0x01 // A
+            case 11: return 0x02 // B
+            case 8: return 0x03 // C
+            case 2: return 0x04 // D
+            case 14: return 0x05 // E
+            case 3: return 0x06 // F
+            case 5: return 0x07 // G
+            case 4: return 0x08 // H
+            case 34: return 0x09 // I
+            case 38: return 0x0a // J
+            case 40: return 0x0b // K
+            case 37: return 0x0c // L
+            case 46: return 0x0d // M
+            case 45: return 0x0e // N
+            case 31: return 0x0f // O
+            case 35: return 0x10 // P
+            case 12: return 0x11 // Q
+            case 15: return 0x12 // R
+            case 1: return 0x13 // S
+            case 17: return 0x14 // T
+            case 32: return 0x15 // U
+            case 9: return 0x16 // V
+            case 13: return 0x17 // W
+            case 7: return 0x18 // X
+            case 16: return 0x19 // Y
+            case 6: return 0x1a // Z
+            case 49: return 0x00 // Space
+            case 33: return 0x1b // [
+            case 42: return 0x1c // \
+            case 30: return 0x1d // ]
+            case 27: return 0x1f // -
+            default: return nil
+            }
+        }
+
+        deinit {
+            if let keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+            }
         }
     }
 }

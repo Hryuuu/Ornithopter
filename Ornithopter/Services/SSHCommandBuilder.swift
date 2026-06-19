@@ -11,9 +11,6 @@ enum SSHCommandBuilder {
         var arguments: [String] = []
         appendSSHOptions(for: profile, to: &arguments)
         appendX11Options(for: profile, to: &arguments)
-        if !profile.x11Forwarding {
-            appendConnectionSharingOptions(for: profile, to: &arguments)
-        }
 
         let command = startupCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
         if command?.isEmpty == false {
@@ -61,9 +58,6 @@ enum SSHCommandBuilder {
             arguments.append(contentsOf: ["-o", "BatchMode=yes"])
         }
         appendSSHOptions(for: profile, to: &arguments)
-        if !profile.x11Forwarding {
-            appendConnectionSharingOptions(for: profile, to: &arguments)
-        }
         arguments.append(profile.destination)
         arguments.append(command)
         return arguments
@@ -127,24 +121,6 @@ enum SSHCommandBuilder {
         if profile.x11Forwarding {
             arguments.append(profile.x11TrustedForwarding ? "-Y" : "-X")
         }
-    }
-
-    private nonisolated static func appendConnectionSharingOptions(for profile: ServerProfile, to arguments: inout [String]) {
-        arguments.append(contentsOf: [
-            "-o",
-            "ControlMaster=auto",
-            "-o",
-            "ControlPersist=600",
-            "-o",
-            "ControlPath=\(controlPath(for: profile))"
-        ])
-    }
-
-    private nonisolated static func controlPath(for profile: ServerProfile) -> String {
-        let name = "\(profile.username)@\(profile.host):\(profile.port)"
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: ":", with: "_")
-        return "/tmp/ornithopter-\(name)"
     }
 
     private nonisolated static func resolvedIdentityFile(for profile: ServerProfile) -> String? {
