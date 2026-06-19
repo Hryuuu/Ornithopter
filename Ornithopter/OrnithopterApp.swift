@@ -191,13 +191,13 @@ private struct OrnithopterSettingsView: View {
             }
 
             Section {
-                LabeledContent("Default identity file location") {
+                LabeledContent("Default SSH key file (default: empty)") {
                     TextField("", text: $defaultIdentityFile)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.body, design: .monospaced))
                 }
 
-                Text("Used as the Identity file location value when creating a new server.")
+                Text("Used as the SSH key file value when creating a new server.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {

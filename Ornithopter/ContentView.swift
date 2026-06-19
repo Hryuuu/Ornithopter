@@ -287,7 +287,7 @@ private struct ServerDetailView: View {
                             }
                         }
 
-                        TextField("Identity file location", text: $profile.identityFile)
+                        TextField("SSH key file", text: $profile.identityFile)
                     }
                     .textFieldStyle(.roundedBorder)
                     .padding(4)

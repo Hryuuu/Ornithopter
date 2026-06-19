@@ -5,7 +5,7 @@
 "Host" = "호스트";
 "Username" = "사용자 이름";
 "Port" = "포트";
-"Identity file location" = "Identity file 위치";
+"SSH key file" = "SSH 키 파일";
 "Default" = "기본";
 "Password authentication" = "비밀번호 인증";
 "Save password in Keychain" = "Keychain에 비밀번호 저장";
@@ -37,8 +37,8 @@
 "Default text editor" = "기본 텍스트 에디터";
 "Custom..." = "사용자 지정...";
 "Editor command" = "에디터 명령";
-"Default identity file location" = "기본 identity file 위치";
-"Used as the Identity file location value when creating a new server." = "새 서버를 만들 때 Identity file 위치 기본값으로 사용합니다.";
+"Default SSH key file (default: empty)" = "기본 SSH 키 파일 (기본값: 비어 있음)";
+"Used as the SSH key file value when creating a new server." = "새 서버를 만들 때 SSH 키 파일 기본값으로 사용합니다.";
 "New server defaults" = "새 서버 기본값";
 "Use comma-separated patterns, such as *.txt, *.md, *.py." = "*.txt, *.md, *.py처럼 쉼표로 구분한 패턴을 사용하세요.";
 "Supported file formats" = "지원 파일 형식";
