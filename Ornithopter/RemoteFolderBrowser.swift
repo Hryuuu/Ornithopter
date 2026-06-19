@@ -1529,12 +1529,20 @@ final class RemoteFileStore: ObservableObject {
 
 struct RemoteFolderBrowser: View {
     @StateObject private var store: RemoteFileStore
+    @AppStorage("supportedTextFilePatterns") private var supportedTextFilePatterns = AppPreferenceDefaults.supportedTextFilePatterns
     @State private var isDropTarget = false
     let collapseAction: () -> Void
+    let editAction: (RemoteFileItem) -> Void
 
-    init(profile: ServerProfile, sessionPassword: String? = nil, collapseAction: @escaping () -> Void) {
+    init(
+        profile: ServerProfile,
+        sessionPassword: String? = nil,
+        collapseAction: @escaping () -> Void,
+        editAction: @escaping (RemoteFileItem) -> Void = { _ in }
+    ) {
         _store = StateObject(wrappedValue: RemoteFileStore(profile: profile, sessionPassword: sessionPassword))
         self.collapseAction = collapseAction
+        self.editAction = editAction
     }
 
     var body: some View {
@@ -1570,7 +1578,13 @@ struct RemoteFolderBrowser: View {
                     }
 
                     ForEach(store.visibleItems(store.items)) { item in
-                        RemoteFileTreeRow(item: item, depth: 0, store: store)
+                        RemoteFileTreeRow(
+                            item: item,
+                            depth: 0,
+                            store: store,
+                            supportedTextFilePatterns: supportedTextFilePatterns,
+                            editAction: editAction
+                        )
                     }
                 }
                 .padding(.vertical, 4)
@@ -1626,6 +1640,8 @@ private struct RemoteFileTreeRow: View {
     let item: RemoteFileItem
     let depth: Int
     @ObservedObject var store: RemoteFileStore
+    let supportedTextFilePatterns: String
+    let editAction: (RemoteFileItem) -> Void
     @State private var isHovering = false
     @State private var isDropTarget = false
     @State private var isRenaming = false
@@ -1634,6 +1650,10 @@ private struct RemoteFileTreeRow: View {
 
     private var uploadTarget: String {
         store.uploadTarget(for: item)
+    }
+
+    private var isEditableTextFile: Bool {
+        AppPreferences.isTextEditableFile(item, patternsValue: supportedTextFilePatterns)
     }
 
     var body: some View {
@@ -1720,6 +1740,12 @@ private struct RemoteFileTreeRow: View {
             .onHover { hovering in
                 isHovering = hovering
             }
+            .onTapGesture(count: 2) {
+                if !isRenaming, isEditableTextFile {
+                    store.select(item, extending: false)
+                    editAction(item)
+                }
+            }
             .onTapGesture {
                 if !isRenaming {
                     let isExtendingSelection = NSEvent.modifierFlags.contains(.command)
@@ -1736,6 +1762,17 @@ private struct RemoteFileTreeRow: View {
                 store.handleDropProviders(providers, to: uploadTarget)
             }
             .contextMenu {
+                if isEditableTextFile {
+                    Button {
+                        editAction(item)
+                    } label: {
+                        Label("Edit", systemImage: "square.and.pencil")
+                    }
+                    .disabled(store.actionItems(for: item).count > 1)
+
+                    Divider()
+                }
+
                 Button {
                     store.copy(item)
                 } label: {
@@ -1805,7 +1842,13 @@ private struct RemoteFileTreeRow: View {
                 }
 
                 ForEach(store.children(for: item)) { child in
-                    RemoteFileTreeRow(item: child, depth: depth + 1, store: store)
+                    RemoteFileTreeRow(
+                        item: child,
+                        depth: depth + 1,
+                        store: store,
+                        supportedTextFilePatterns: supportedTextFilePatterns,
+                        editAction: editAction
+                    )
                 }
             }
         }

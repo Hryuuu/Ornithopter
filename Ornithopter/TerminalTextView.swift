@@ -38,6 +38,7 @@ struct TerminalTextView: NSViewRepresentable {
     let sessionPassword: String?
     let runtime: TerminalSessionRuntime
     let isActive: Bool
+    let startupCommand: String?
     let onRunningChanged: (Bool) -> Void
     let onUnexpectedExit: (Int32) -> Void
     let onTitleChanged: (String) -> Void
@@ -64,6 +65,7 @@ struct TerminalTextView: NSViewRepresentable {
         Coordinator(
             profile: profile,
             sessionPassword: sessionPassword,
+            startupCommand: startupCommand,
             onRunningChanged: onRunningChanged,
             onUnexpectedExit: onUnexpectedExit,
             onTitleChanged: onTitleChanged
@@ -84,6 +86,7 @@ struct TerminalTextView: NSViewRepresentable {
         runtime.coordinator = coordinator
         coordinator.profile = profile
         coordinator.sessionPassword = sessionPassword
+        coordinator.startupCommand = startupCommand
         coordinator.onRunningChanged = onRunningChanged
         coordinator.onUnexpectedExit = onUnexpectedExit
         coordinator.onTitleChanged = onTitleChanged
@@ -109,6 +112,7 @@ struct TerminalTextView: NSViewRepresentable {
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         var profile: ServerProfile
         var sessionPassword: String?
+        var startupCommand: String?
         var onRunningChanged: (Bool) -> Void
         var onUnexpectedExit: (Int32) -> Void
         var onTitleChanged: (String) -> Void
@@ -118,12 +122,14 @@ struct TerminalTextView: NSViewRepresentable {
         init(
             profile: ServerProfile,
             sessionPassword: String?,
+            startupCommand: String?,
             onRunningChanged: @escaping (Bool) -> Void,
             onUnexpectedExit: @escaping (Int32) -> Void,
             onTitleChanged: @escaping (String) -> Void
         ) {
             self.profile = profile
             self.sessionPassword = sessionPassword
+            self.startupCommand = startupCommand
             self.onRunningChanged = onRunningChanged
             self.onUnexpectedExit = onUnexpectedExit
             self.onTitleChanged = onTitleChanged
@@ -139,7 +145,7 @@ struct TerminalTextView: NSViewRepresentable {
 
             terminalView.startProcess(
                 executable: "/usr/bin/ssh",
-                args: SSHCommandBuilder.sshArguments(for: profile),
+                args: SSHCommandBuilder.sshArguments(for: profile, startupCommand: startupCommand),
                 environment: terminalEnvironment(),
                 execName: "ssh"
             )
@@ -205,6 +211,7 @@ struct TerminalTextView: View {
     let sessionPassword: String?
     let runtime: TerminalSessionRuntime
     let isActive: Bool
+    let startupCommand: String?
     let onRunningChanged: (Bool) -> Void
     let onUnexpectedExit: (Int32) -> Void
     let onTitleChanged: (String) -> Void

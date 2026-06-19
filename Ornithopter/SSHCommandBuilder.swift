@@ -7,15 +7,28 @@ import Darwin
 import Foundation
 
 enum SSHCommandBuilder {
-    nonisolated static func sshArguments(for profile: ServerProfile) -> [String] {
+    nonisolated static func sshArguments(for profile: ServerProfile, startupCommand: String? = nil) -> [String] {
         var arguments: [String] = []
         appendSSHOptions(for: profile, to: &arguments)
         appendX11Options(for: profile, to: &arguments)
         if !profile.x11Forwarding {
             appendConnectionSharingOptions(for: profile, to: &arguments)
         }
+
+        let command = startupCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if command?.isEmpty == false {
+            arguments.append("-t")
+        }
+
         arguments.append(profile.destination)
+        if let command, !command.isEmpty {
+            arguments.append(command)
+        }
         return arguments
+    }
+
+    nonisolated static func shellQuotedArgument(_ value: String) -> String {
+        shellQuote(value)
     }
 
     nonisolated static func folderListArguments(for profile: ServerProfile, path: String) -> [String] {

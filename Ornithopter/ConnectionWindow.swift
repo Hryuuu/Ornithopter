@@ -48,6 +48,8 @@ enum SSHSessionWindowManager {
 struct ConnectionWindowView: View {
     let profile: ServerProfile
     let sessionPassword: String?
+    @AppStorage("defaultTextEditor") private var defaultTextEditor = AppPreferenceDefaults.textEditor
+    @AppStorage("customTextEditor") private var customTextEditor = AppPreferenceDefaults.customTextEditor
     @State private var isExplorerVisible = true
     @State private var terminalLayout = TerminalLayout()
     @State private var activePaneID: TerminalPane.ID?
@@ -60,6 +62,9 @@ struct ConnectionWindowView: View {
                     sessionPassword: sessionPassword,
                     collapseAction: {
                         isExplorerVisible = false
+                    },
+                    editAction: { item in
+                        openRemoteFileInEditor(item)
                     }
                 )
                 .frame(width: 240)
@@ -126,6 +131,52 @@ struct ConnectionWindowView: View {
     private func addSession(to paneID: TerminalPane.ID) {
         terminalLayout.addSession(to: paneID)
         activePaneID = paneID
+    }
+
+    private func openRemoteFileInEditor(_ item: RemoteFileItem) {
+        guard !item.isDirectory else {
+            return
+        }
+
+        let editor = AppPreferences.effectiveTextEditor(defaultEditor: defaultTextEditor, customEditor: customTextEditor)
+        let command = editorStartupCommand(editor: editor, path: item.path)
+        let paneID = terminalLayout.validPaneID(preferred: activePaneID)
+        terminalLayout.addSession(
+            to: paneID,
+            title: "\(editor) \(item.name)",
+            startupCommand: command
+        )
+        activePaneID = paneID
+    }
+
+    private func editorStartupCommand(editor: String, path: String) -> String {
+        let parent = parentPath(for: path)
+        let filename = filename(for: path)
+        let quotedParent = SSHCommandBuilder.shellQuotedArgument(parent)
+        let quotedFilename = SSHCommandBuilder.shellQuotedArgument(filename)
+        return "cd \(quotedParent) && \(editor) \(quotedFilename); exec \"${SHELL:-/bin/sh}\""
+    }
+
+    private func parentPath(for path: String) -> String {
+        guard path != "." && path != "/" else {
+            return path
+        }
+
+        let parts = path.split(separator: "/").map(String.init)
+        guard parts.count > 1 else {
+            return "."
+        }
+
+        if path.hasPrefix("/") {
+            return "/" + parts.dropLast().joined(separator: "/")
+        }
+
+        return parts.dropLast().joined(separator: "/")
+    }
+
+    private func filename(for path: String) -> String {
+        let parts = path.split(separator: "/").map(String.init)
+        return parts.last ?? path
     }
 
     private func closeSession(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID) {
@@ -200,12 +251,14 @@ private struct TerminalSession: Identifiable, Equatable {
     let id = UUID()
     var title: String
     var terminalID = UUID()
+    var startupCommand: String?
     let runtime = TerminalSessionRuntime()
 
     static func == (lhs: TerminalSession, rhs: TerminalSession) -> Bool {
         lhs.id == rhs.id
             && lhs.title == rhs.title
             && lhs.terminalID == rhs.terminalID
+            && lhs.startupCommand == rhs.startupCommand
     }
 }
 
@@ -258,10 +311,13 @@ private struct TerminalLayout: Equatable {
         splitAxis = nil
     }
 
-    mutating func addSession(to paneID: TerminalPane.ID) {
+    mutating func addSession(to paneID: TerminalPane.ID, title: String? = nil, startupCommand: String? = nil) {
         updatePane(paneID) { pane in
             let nextNumber = (pane.sessions.map { Self.terminalNumber(from: $0.title) }.max() ?? 0) + 1
-            let session = TerminalSession(title: "Terminal \(nextNumber)")
+            let session = TerminalSession(
+                title: title ?? "Terminal \(nextNumber)",
+                startupCommand: startupCommand
+            )
             pane.sessions.append(session)
             pane.selectedSessionID = session.id
         }
@@ -602,6 +658,7 @@ private struct TerminalPaneView: View {
                             sessionPassword: sessionPassword,
                             runtime: session.runtime,
                             isActive: isActivePane && session.id == pane.selectedSessionID,
+                            startupCommand: session.startupCommand,
                             onRunningChanged: { _ in },
                             onUnexpectedExit: { status in
                                 DispatchQueue.main.async {
