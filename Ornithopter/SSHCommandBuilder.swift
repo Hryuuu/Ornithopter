@@ -32,17 +32,27 @@ enum SSHCommandBuilder {
         return arguments
     }
 
-    nonisolated static func sftpArguments(for profile: ServerProfile) -> [String] {
-        var arguments: [String] = [
-            "-b",
-            "-",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5"
-        ]
+    nonisolated static func sftpArguments(for profile: ServerProfile, allowPassword: Bool = false) -> [String] {
+        var arguments: [String] = ["-o", "ConnectTimeout=5"]
+        if !allowPassword {
+            arguments.append(contentsOf: ["-b", "-", "-o", "BatchMode=yes"])
+        }
         appendSFTPOptions(for: profile, to: &arguments)
         arguments.append(profile.destination)
+        return arguments
+    }
+
+    nonisolated static func remoteCommandArguments(for profile: ServerProfile, command: String, allowPassword: Bool = false) -> [String] {
+        var arguments: [String] = ["-o", "ConnectTimeout=5"]
+        if !allowPassword {
+            arguments.append(contentsOf: ["-o", "BatchMode=yes"])
+        }
+        appendSSHOptions(for: profile, to: &arguments)
+        if !profile.x11Forwarding {
+            appendConnectionSharingOptions(for: profile, to: &arguments)
+        }
+        arguments.append(profile.destination)
+        arguments.append(command)
         return arguments
     }
 
@@ -102,7 +112,7 @@ enum SSHCommandBuilder {
 
     private nonisolated static func appendX11Options(for profile: ServerProfile, to arguments: inout [String]) {
         if profile.x11Forwarding {
-            arguments.append("-Y")
+            arguments.append(profile.x11TrustedForwarding ? "-Y" : "-X")
         }
     }
 

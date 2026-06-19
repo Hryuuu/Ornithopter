@@ -11,6 +11,7 @@ import SwiftTerm
 
 struct TerminalTextView: NSViewRepresentable {
     let profile: ServerProfile
+    let sessionPassword: String?
     let onRunningChanged: (Bool) -> Void
     let onUnexpectedExit: (Int32) -> Void
 
@@ -22,6 +23,7 @@ struct TerminalTextView: NSViewRepresentable {
         terminalView.caretColor = NSColor(calibratedRed: 0.65, green: 0.95, blue: 0.62, alpha: 1)
         terminalView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         terminalView.backspaceSendsControlH = false
+        terminalView.getTerminal().registerOscHandler(code: 3008) { _ in }
 
         context.coordinator.startIfNeeded(terminalView)
         return terminalView
@@ -29,6 +31,7 @@ struct TerminalTextView: NSViewRepresentable {
 
     func updateNSView(_ terminalView: LocalProcessTerminalView, context: Context) {
         context.coordinator.profile = profile
+        context.coordinator.sessionPassword = sessionPassword
         context.coordinator.onRunningChanged = onRunningChanged
         context.coordinator.onUnexpectedExit = onUnexpectedExit
 
@@ -44,6 +47,7 @@ struct TerminalTextView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(
             profile: profile,
+            sessionPassword: sessionPassword,
             onRunningChanged: onRunningChanged,
             onUnexpectedExit: onUnexpectedExit
         )
@@ -51,6 +55,7 @@ struct TerminalTextView: NSViewRepresentable {
 
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         var profile: ServerProfile
+        var sessionPassword: String?
         var onRunningChanged: (Bool) -> Void
         var onUnexpectedExit: (Int32) -> Void
         var didStart = false
@@ -58,10 +63,12 @@ struct TerminalTextView: NSViewRepresentable {
 
         init(
             profile: ServerProfile,
+            sessionPassword: String?,
             onRunningChanged: @escaping (Bool) -> Void,
             onUnexpectedExit: @escaping (Int32) -> Void
         ) {
             self.profile = profile
+            self.sessionPassword = sessionPassword
             self.onRunningChanged = onRunningChanged
             self.onUnexpectedExit = onUnexpectedExit
         }
@@ -116,9 +123,11 @@ struct TerminalTextView: NSViewRepresentable {
         private func terminalEnvironment() -> [String] {
             ProcessInfo.processInfo.environment
                 .merging([
-                "TERM": "xterm-256color",
-                "LC_CTYPE": "UTF-8"
+                    "TERM": "xterm-256color",
+                    "LANG": "en_US.UTF-8",
+                    "LC_CTYPE": "en_US.UTF-8"
                 ]) { _, new in new }
+                .merging(SSHAskPass.environment(password: sessionPassword)) { _, new in new }
                 .map { "\($0.key)=\($0.value)" }
         }
     }
@@ -128,6 +137,7 @@ struct TerminalTextView: NSViewRepresentable {
 
 struct TerminalTextView: View {
     let profile: ServerProfile
+    let sessionPassword: String?
     let onRunningChanged: (Bool) -> Void
     let onUnexpectedExit: (Int32) -> Void
 

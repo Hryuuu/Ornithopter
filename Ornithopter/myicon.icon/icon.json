@@ -1,0 +1,90 @@
+{
+  "fill" : {
+    "solid" : "gray:0.24930,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : "none",
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "mascot.png",
+          "name" : "mascot",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 0.1,
+            "translation-in-points" : [
+              260,
+              -242
+            ]
+          }
+        },
+        {
+          "glass" : false,
+          "image-name" : "__.png",
+          "name" : "__",
+          "position" : {
+            "scale" : 1.4,
+            "translation-in-points" : [
+              -163,
+              -119
+            ]
+          }
+        },
+        {
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "Rectangle 4.png",
+          "name" : "Rectangle 4",
+          "position" : {
+            "scale" : 1.45,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "glass" : false,
+          "image-name" : "Rectangle 3.png",
+          "name" : "Rectangle 3",
+          "position" : {
+            "scale" : 1.45,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "glass" : false,
+          "image-name" : "Rectangle 2.png",
+          "name" : "Rectangle 2",
+          "position" : {
+            "scale" : 1.45,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}

@@ -8,14 +8,25 @@ import SwiftUI
 
 enum SSHSessionWindowManager {
     private static var windows: [NSWindow] = []
+    private static let initialWindowSize = NSSize(width: 1120, height: 720)
+    private static let minimumWindowSize = NSSize(width: 920, height: 560)
 
-    static func open(profile: ServerProfile) {
-        let controller = NSHostingController(rootView: ConnectionWindowView(profile: profile))
+    @discardableResult
+    static func open(profile: ServerProfile) -> Bool {
+        let sessionPassword = SSHPasswordPrompter.passwordForConnection(profile: profile)
+        if profile.passwordAuthentication && sessionPassword == nil {
+            return false
+        }
+
+        let controller = NSHostingController(
+            rootView: ConnectionWindowView(profile: profile, sessionPassword: sessionPassword)
+        )
         let window = NSWindow(contentViewController: controller)
-        window.title = ""
-        window.titleVisibility = .hidden
-        window.setContentSize(NSSize(width: 1120, height: 720))
-        window.minSize = NSSize(width: 860, height: 520)
+        window.title = profile.displayName
+        window.titleVisibility = .visible
+        window.setContentSize(initialWindowSize)
+        window.minSize = minimumWindowSize
+        window.contentMinSize = minimumWindowSize
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.center()
         windows.append(window)
@@ -29,52 +40,74 @@ enum SSHSessionWindowManager {
         }
 
         window.makeKeyAndOrderFront(nil)
+        return true
     }
 }
 
 struct ConnectionWindowView: View {
     let profile: ServerProfile
-    @State private var isRunning = false
-    @State private var showReconnectPrompt = false
-    @State private var disconnectStatus: Int32 = 0
+    let sessionPassword: String?
     @State private var terminalID = UUID()
+    @State private var isExplorerVisible = true
 
     var body: some View {
-        HSplitView {
-            RemoteFolderBrowser(profile: profile)
-                .frame(minWidth: 180, idealWidth: 195, maxWidth: 300)
-
-            VStack(spacing: 0) {
-                HStack {
-                    Label(profile.displayName, systemImage: isRunning ? "checkmark.circle.fill" : "terminal")
-                        .foregroundStyle(isRunning ? .green : .secondary)
+        HStack(spacing: 0) {
+            if isExplorerVisible {
+                RemoteFolderBrowser(
+                    profile: profile,
+                    sessionPassword: sessionPassword,
+                    collapseAction: {
+                        isExplorerVisible = false
+                    }
+                )
+                .frame(width: 240)
+            } else {
+                VStack {
+                    Button {
+                        isExplorerVisible = true
+                    } label: {
+                        Image(systemName: "sidebar.leading")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Show Explorer")
 
                     Spacer()
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(.bar)
+                .padding(.top, 8)
+                .frame(width: 32)
+                .background(Color(nsColor: .controlBackgroundColor))
+            }
 
+            Divider()
+
+            VStack(spacing: 0) {
                 TerminalTextView(
                     profile: profile,
-                    onRunningChanged: { isRunning = $0 },
+                    sessionPassword: sessionPassword,
+                    onRunningChanged: { _ in },
                     onUnexpectedExit: { status in
-                        disconnectStatus = status
-                        showReconnectPrompt = true
+                        DispatchQueue.main.async {
+                            if confirmReconnect(status: status) {
+                                terminalID = UUID()
+                            }
+                        }
                     }
                 )
                 .id(terminalID)
             }
             .frame(minWidth: 620)
         }
-        .alert("SSH connection closed", isPresented: $showReconnectPrompt) {
-            Button("Reconnect") {
-                terminalID = UUID()
-            }
+        .frame(minWidth: 920, minHeight: 560)
+    }
 
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The session ended unexpectedly with status \(disconnectStatus).")
-        }
+    private func confirmReconnect(status: Int32) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "SSH connection closed"
+        alert.informativeText = "The session ended unexpectedly with status \(status)."
+        alert.addButton(withTitle: "Reconnect")
+        alert.addButton(withTitle: "Cancel")
+
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }

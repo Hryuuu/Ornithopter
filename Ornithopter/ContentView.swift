@@ -3,31 +3,22 @@
 //  Ornithopter
 //
 
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
     @StateObject private var store = ProfileStore()
     @State private var selection: ServerProfile.ID?
     @State private var searchText = ""
+    @State private var scrollTarget: ServerProfile.ID?
 
     private var filteredProfiles: [ServerProfile] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !query.isEmpty else {
-            return store.profiles
+        let profiles = query.isEmpty ? store.profiles : store.profiles.filter { profile in
+            profile.searchText.contains(query)
         }
 
-        return store.profiles.filter { profile in
-            [
-                profile.name,
-                profile.host,
-                profile.username,
-                profile.tags.joined(separator: " "),
-                profile.notes
-            ]
-            .joined(separator: " ")
-            .lowercased()
-            .contains(query)
-        }
+        return sortedProfiles(profiles)
     }
 
     private var selectedProfile: Binding<ServerProfile>? {
@@ -43,65 +34,158 @@ struct ContentView: View {
         NavigationSplitView {
             VStack(spacing: 0) {
                 ServerListHeader(
-                    searchText: $searchText,
-                    addAction: addProfile
+                    searchText: $searchText
                 )
 
-                List(filteredProfiles, selection: $selection) { profile in
-                    ServerRow(profile: profile)
-                        .tag(profile.id)
+                ScrollViewReader { proxy in
+                    List(filteredProfiles, selection: $selection) { profile in
+                        ServerRow(profile: profile)
+                            .tag(profile.id)
+                            .id(profile.id)
+                    }
+                    .listStyle(.sidebar)
+                    .onChange(of: scrollTarget) { _, target in
+                        guard let target else {
+                            return
+                        }
+
+                        DispatchQueue.main.async {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                proxy.scrollTo(target, anchor: .top)
+                            }
+                        }
+                    }
+                    .onChange(of: searchText) { _, _ in
+                        guard let firstResult = filteredProfiles.first?.id else {
+                            return
+                        }
+
+                        DispatchQueue.main.async {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                proxy.scrollTo(firstResult, anchor: .top)
+                            }
+                        }
+                    }
                 }
-                .listStyle(.sidebar)
             }
             .navigationSplitViewColumnWidth(min: 260, ideal: 320)
         } detail: {
             if let selectedProfile {
                 ServerDetailView(
                     profile: selectedProfile,
+                    connectAction: connect,
                     deleteAction: { deleteProfile(selectedProfile.wrappedValue) }
                 )
             } else {
                 EmptySelectionView(addAction: addProfile)
             }
         }
-        .frame(minWidth: 980, minHeight: 640)
+        .frame(minWidth: 760, minHeight: 620)
+        .background(
+            WindowSizeConfigurator(
+                initialWidth: 820,
+                initialHeight: 700,
+                minimumWidth: 760,
+                minimumHeight: 620
+            )
+        )
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button(action: addProfile) {
+                    Image(systemName: "plus")
+                }
+                .help("Add server")
+            }
+        }
         .onAppear {
             if selection == nil {
-                selection = store.profiles.first?.id
+                selection = filteredProfiles.first?.id
+            }
+        }
+    }
+
+    private func sortedProfiles(_ profiles: [ServerProfile]) -> [ServerProfile] {
+        profiles.sorted { lhs, rhs in
+            switch (lhs.lastConnectedAt, rhs.lastConnectedAt) {
+            case let (left?, right?) where left != right:
+                return left > right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
             }
         }
     }
 
     private func addProfile() {
         let profile = store.addProfile()
+        searchText = ""
         selection = profile.id
+        scrollTarget = profile.id
     }
 
     private func deleteProfile(_ profile: ServerProfile) {
         store.delete(profile)
-        selection = store.profiles.first?.id
+        selection = filteredProfiles.first?.id
+    }
+
+    private func connect(_ profile: ServerProfile) {
+        if SSHSessionWindowManager.open(profile: profile) {
+            store.markConnected(profile)
+        }
+    }
+}
+
+private struct WindowSizeConfigurator: NSViewRepresentable {
+    let initialWidth: CGFloat
+    let initialHeight: CGFloat
+    let minimumWidth: CGFloat
+    let minimumHeight: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        configureWindow(for: view, context: context)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        configureWindow(for: nsView, context: context)
+    }
+
+    private func configureWindow(for view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = view.window else {
+                return
+            }
+
+            let minimumSize = NSSize(width: minimumWidth, height: minimumHeight)
+            window.minSize = minimumSize
+
+            guard !context.coordinator.didSetInitialSize else {
+                return
+            }
+
+            context.coordinator.didSetInitialSize = true
+            window.setContentSize(NSSize(width: initialWidth, height: initialHeight))
+        }
+    }
+
+    final class Coordinator {
+        var didSetInitialSize = false
     }
 }
 
 private struct ServerListHeader: View {
     @Binding var searchText: String
-    let addAction: () -> Void
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("Ornithopter")
-                    .font(.title2.weight(.semibold))
-
-                Spacer()
-
-                Button(action: addAction) {
-                    Image(systemName: "plus")
-                }
-                .buttonStyle(.bordered)
-                .help("Add server")
-            }
-
+        VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
@@ -127,16 +211,23 @@ private struct ServerRow: View {
                     .lineLimit(1)
                 Spacer()
                 if profile.port != 22 {
-                    Text("\(profile.port)")
+                    Text(verbatim: String(profile.port))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            Text(profile.destination)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            if profile.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("Host not set")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text(profile.destination)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
 
             if !profile.tags.isEmpty {
                 HStack(spacing: 6) {
@@ -156,19 +247,28 @@ private struct ServerRow: View {
 
 private struct ServerDetailView: View {
     @Binding var profile: ServerProfile
+    let connectAction: (ServerProfile) -> Void
     let deleteAction: () -> Void
+    @State private var hasStoredKeychainPassword = false
 
-    private var sshCommand: String {
-        SSHCommandBuilder.sshCommand(for: profile)
+    private var canConnect: Bool {
+        !profile.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !profile.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canSaveKeychainPassword: Bool {
+        profile.passwordAuthentication &&
+        profile.savePasswordInKeychain &&
+        canConnect
     }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                DetailHeader(profile: profile, sshCommand: sshCommand)
+            VStack(alignment: .leading, spacing: 16) {
+                DetailHeader(profile: profile, canConnect: canConnect, connectAction: connectAction)
 
                 GroupBox {
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 12) {
                         TextField("Name", text: $profile.name)
                         TextField("Host", text: $profile.host)
 
@@ -181,12 +281,57 @@ private struct ServerDetailView: View {
                         }
 
                         TextField("Identity file", text: $profile.identityFile)
-                        TextField("Remote path", text: $profile.remotePath)
+                    }
+                    .textFieldStyle(.roundedBorder)
+                    .padding(4)
+                } label: {
+                    Label("Default", systemImage: "server.rack")
+                }
 
-                        Toggle(isOn: $profile.x11Forwarding) {
-                            Label("X11 forwarding", systemImage: "macwindow")
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        SettingsToggleRow(isOn: $profile.passwordAuthentication, title: "Password authentication", systemImage: "key")
+
+                        HStack(alignment: .center, spacing: 10) {
+                            SettingsToggleRow(isOn: $profile.savePasswordInKeychain, title: "Save password in Keychain", systemImage: "lock")
+                                .disabled(!profile.passwordAuthentication)
+                                .opacity(profile.passwordAuthentication ? 1 : 0.55)
+
+                            Spacer()
+
+                            Button {
+                                if SSHPasswordPrompter.updateKeychainPassword(for: profile) {
+                                    hasStoredKeychainPassword = true
+                                }
+                            } label: {
+                                Label(
+                                    hasStoredKeychainPassword ? "Update Keychain Password..." : "Set Keychain Password...",
+                                    systemImage: "key.fill"
+                                )
+                            }
+                            .controlSize(.small)
+                            .font(.caption)
+                            .disabled(!canSaveKeychainPassword)
+                            .help(canConnect ? "Save or update the password for this server." : "Enter a host and username first.")
                         }
+                        .frame(minHeight: 24)
 
+                        SettingsToggleRow(isOn: $profile.x11Forwarding, title: "X11 forwarding", systemImage: "display")
+
+                        SettingsToggleRow(isOn: $profile.x11TrustedForwarding, title: "Trusted forwarding (-Y)", systemImage: "lock.shield")
+                            .disabled(!profile.x11Forwarding)
+                            .opacity(profile.x11Forwarding ? 1 : 0.55)
+                            .help("Off uses -X. On uses -Y.")
+
+                        SettingsToggleRow(isOn: $profile.hideHiddenFiles, title: "Hide hidden files", systemImage: "eye.slash")
+                    }
+                    .padding(4)
+                } label: {
+                    Label("Options", systemImage: "checklist")
+                }
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 12) {
                         TagEditor(tags: $profile.tags)
 
                         TextField("Notes", text: $profile.notes, axis: .vertical)
@@ -195,127 +340,199 @@ private struct ServerDetailView: View {
                     .textFieldStyle(.roundedBorder)
                     .padding(4)
                 } label: {
-                    Label("Connection", systemImage: "server.rack")
+                    Label("Tags & Notes", systemImage: "tag")
                 }
 
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 14) {
-                        CommandPreview(command: sshCommand)
+                HStack {
+                    Spacer()
 
-                        HStack {
-                            Button {
-                                SSHSessionWindowManager.open(profile: profile)
-                            } label: {
-                                Label("Connect", systemImage: "terminal")
-                            }
-                            .buttonStyle(.borderedProminent)
-
-                            Button {
-                                TerminalLauncher.copyToClipboard(sshCommand)
-                            } label: {
-                                Label("Copy", systemImage: "doc.on.doc")
-                            }
-                        }
+                    Button(role: .destructive) {
+                        confirmDelete()
+                    } label: {
+                        Label("Delete Server", systemImage: "trash")
                     }
-                    .padding(4)
-                } label: {
-                    Label("SSH", systemImage: "network")
-                }
-
-                Button(role: .destructive, action: deleteAction) {
-                    Label("Delete Server", systemImage: "trash")
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
                 }
             }
-            .padding(28)
-            .frame(maxWidth: 860, alignment: .leading)
+            .padding(.horizontal, 28)
+            .padding(.top, 14)
+            .padding(.bottom, 28)
+            .frame(maxWidth: 680, alignment: .leading)
+        }
+        .onAppear(perform: refreshKeychainState)
+        .onChange(of: profile.id) { _, _ in
+            refreshKeychainState()
+        }
+    }
+
+    private func confirmDelete() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete \(profile.displayName)?"
+        alert.informativeText = "This server profile will be removed from Ornithopter."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        deleteAction()
+    }
+
+    private func refreshKeychainState() {
+        guard canConnect else {
+            hasStoredKeychainPassword = false
+            return
+        }
+
+        hasStoredKeychainPassword = SSHPasswordKeychain.hasPassword(for: profile)
+    }
+}
+
+private struct SettingsToggleRow: View {
+    @Binding var isOn: Bool
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            SettingsToggleLabel(title, systemImage: systemImage)
+        }
+        .frame(minHeight: 24, alignment: .center)
+    }
+}
+
+private struct SettingsToggleLabel: View {
+    let title: String
+    let systemImage: String
+
+    init(_ title: String, systemImage: String) {
+        self.title = title
+        self.systemImage = systemImage
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.body)
+                .frame(width: 18, alignment: .center)
+
+            Text(title)
         }
     }
 }
 
 private struct DetailHeader: View {
     let profile: ServerProfile
-    let sshCommand: String
+    let canConnect: Bool
+    let connectAction: (ServerProfile) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .center, spacing: 16) {
                 Text(profile.displayName)
                     .font(.largeTitle.weight(.semibold))
                     .lineLimit(1)
 
                 Spacer()
 
-                Text(profile.host)
-                    .font(.callout.monospaced())
-                    .foregroundStyle(.secondary)
+                Button {
+                    connectAction(profile)
+                } label: {
+                    Label("Connect", systemImage: "terminal")
+                        .font(.title3.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(!canConnect)
+                .help(canConnect ? "Connect to server" : "Enter host and username to connect")
             }
-
-            Text(sshCommand)
-                .font(.callout.monospaced())
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .lineLimit(2)
         }
     }
 }
 
 private struct TagEditor: View {
+    private let maxTagLength = 18
+    private let maxTagCount = 5
     @Binding var tags: [String]
     @State private var tagText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                TextField("Add tag", text: $tagText)
+                TextField("Add tag", text: limitedTagText)
                     .onSubmit(addTag)
+                    .disabled(tags.count >= maxTagCount)
 
                 Button(action: addTag) {
                     Image(systemName: "plus")
                 }
+                .disabled(!canAddTag)
                 .help("Add tag")
             }
 
             if !tags.isEmpty {
-                FlowLayout(items: tags) { tag in
-                    HStack(spacing: 4) {
-                        Text(tag)
-                        Button {
-                            tags.removeAll { $0 == tag }
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.caption2)
+                HStack(spacing: 8) {
+                    ForEach(tags, id: \.self) { tag in
+                        HStack(spacing: 5) {
+                            Text(tag)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+
+                            Button {
+                                tags.removeAll { $0 == tag }
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: 132, alignment: .leading)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+                        }
                     }
-                    .font(.caption.weight(.medium))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(.tertiary, in: Capsule())
                 }
             }
         }
     }
 
+    private var limitedTagText: Binding<String> {
+        Binding(
+            get: { tagText },
+            set: { tagText = String($0.prefix(maxTagLength)) }
+        )
+    }
+
+    private var normalizedTag: String {
+        String(tagText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maxTagLength))
+    }
+
+    private var canAddTag: Bool {
+        !normalizedTag.isEmpty &&
+        !tags.contains(normalizedTag) &&
+        tags.count < maxTagCount
+    }
+
     private func addTag() {
-        let tag = tagText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !tag.isEmpty, !tags.contains(tag) else {
+        let tag = normalizedTag
+        guard canAddTag else {
+            tagText = ""
             return
         }
         tags.append(tag)
         tagText = ""
-    }
-}
-
-private struct CommandPreview: View {
-    let command: String
-
-    var body: some View {
-        Text(command)
-            .font(.system(.callout, design: .monospaced))
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

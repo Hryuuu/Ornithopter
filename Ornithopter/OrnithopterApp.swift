@@ -13,5 +13,7 @@ struct OrnithopterApp: App {
         WindowGroup {
             ContentView()
         }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 820, height: 700)
     }
 }
