@@ -132,9 +132,17 @@ struct ContentView: View {
     }
 
     private func connect(_ profile: ServerProfile) {
-        if SSHSessionWindowManager.open(profile: profile) {
+        if SSHSessionWindowManager.open(profile: profile, keychainSavingEnabled: enableKeychainSaving) {
             store.markConnected(profile)
         }
+    }
+
+    private func enableKeychainSaving(for profileID: ServerProfile.ID) {
+        guard let index = store.profiles.firstIndex(where: { $0.id == profileID }) else {
+            return
+        }
+
+        store.profiles[index].savePasswordInKeychain = true
     }
 }
 
@@ -430,6 +438,9 @@ private struct ServerDetailView: View {
             DispatchQueue.main.async {
                 profile.passwordAuthentication = value
             }
+        }
+        .onChange(of: profile.savePasswordInKeychain) { _, _ in
+            refreshKeychainState()
         }
     }
 

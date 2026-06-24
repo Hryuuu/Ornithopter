@@ -70,6 +70,63 @@ final class TerminalSessionRuntime {
 
 #if canImport(SwiftTerm)
 
+final class OrnithopterTerminalView: LocalProcessTerminalView {
+    private var isComposingMarkedText = false
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        isComposingMarkedText = Self.plainText(from: string)?.isEmpty == false
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+    }
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        guard let text = Self.plainText(from: string),
+              shouldSendIMECommitAsText(text) else {
+            isComposingMarkedText = false
+            super.insertText(string, replacementRange: replacementRange)
+            return
+        }
+
+        super.unmarkText()
+        isComposingMarkedText = false
+        send(txt: text)
+    }
+
+    override func unmarkText() {
+        isComposingMarkedText = false
+        super.unmarkText()
+    }
+
+    private func shouldSendIMECommitAsText(_ text: String) -> Bool {
+        isComposingMarkedText && text.unicodeScalars.contains(where: Self.isHangulScalar)
+    }
+
+    nonisolated private static func plainText(from value: Any) -> String? {
+        switch value {
+        case let string as String:
+            return string
+        case let string as NSString:
+            return string as String
+        case let attributed as NSAttributedString:
+            return attributed.string
+        default:
+            return nil
+        }
+    }
+
+    nonisolated private static func isHangulScalar(_ scalar: UnicodeScalar) -> Bool {
+        switch scalar.value {
+        case 0x1100...0x11FF,   // Hangul Jamo
+             0x3130...0x318F,   // Hangul Compatibility Jamo
+             0xA960...0xA97F,   // Hangul Jamo Extended-A
+             0xAC00...0xD7A3,   // Hangul Syllables
+             0xD7B0...0xD7FF:   // Hangul Jamo Extended-B
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 struct TerminalTextView: NSViewRepresentable {
     let profile: ServerProfile
     let sessionPassword: String?
@@ -138,7 +195,7 @@ struct TerminalTextView: NSViewRepresentable {
     }
 
     private func makeTerminalView(coordinator: Coordinator) -> LocalProcessTerminalView {
-        let terminalView = LocalProcessTerminalView(frame: .zero)
+        let terminalView = OrnithopterTerminalView(frame: .zero)
         terminalView.processDelegate = coordinator
         terminalView.nativeBackgroundColor = NSColor(calibratedWhite: 0.03, alpha: 1)
         terminalView.nativeForegroundColor = NSColor(calibratedWhite: 0.88, alpha: 1)

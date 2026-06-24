@@ -15,15 +15,28 @@ enum SSHSessionWindowManager {
     private static let minimumWindowSize = NSSize(width: 920, height: 560)
 
     @discardableResult
-    static func open(profile: ServerProfile) -> Bool {
-        openWindow(profile: profile)
+    static func open(profile: ServerProfile, keychainSavingEnabled: ((ServerProfile.ID) -> Void)? = nil) -> Bool {
+        openWindow(profile: profile, keychainSavingEnabled: keychainSavingEnabled)
     }
 
     @discardableResult
-    private static func openWindow(profile: ServerProfile, sessionPassword providedPassword: String? = nil, initialSession: TerminalSession? = nil, at screenPoint: NSPoint? = nil) -> Bool {
-        let sessionPassword = providedPassword ?? SSHPasswordPrompter.passwordForConnection(profile: profile)
+    private static func openWindow(
+        profile: ServerProfile,
+        sessionPassword providedPassword: String? = nil,
+        initialSession: TerminalSession? = nil,
+        at screenPoint: NSPoint? = nil,
+        keychainSavingEnabled: ((ServerProfile.ID) -> Void)? = nil
+    ) -> Bool {
+        let passwordResult = providedPassword.map {
+            SSHConnectionPasswordResult(password: $0, shouldEnableKeychainSaving: false)
+        } ?? SSHPasswordPrompter.passwordForConnection(profile: profile)
+        let sessionPassword = passwordResult?.password
         if profile.passwordAuthentication && sessionPassword == nil {
             return false
+        }
+
+        if passwordResult?.shouldEnableKeychainSaving == true {
+            keychainSavingEnabled?(profile.id)
         }
 
         let windowID = UUID()

@@ -12,6 +12,11 @@ struct SSHPasswordPromptResult {
     let saveInKeychain: Bool
 }
 
+struct SSHConnectionPasswordResult {
+    let password: String?
+    let shouldEnableKeychainSaving: Bool
+}
+
 enum SSHPasswordKeychain {
     private static let service = "kucc.co.kr.Ornithopter.ssh-password"
 
@@ -87,15 +92,15 @@ enum SSHPasswordKeychain {
 }
 
 enum SSHPasswordPrompter {
-    static func passwordForConnection(profile: ServerProfile) -> String? {
+    static func passwordForConnection(profile: ServerProfile) -> SSHConnectionPasswordResult? {
         guard profile.passwordAuthentication else {
-            return nil
+            return SSHConnectionPasswordResult(password: nil, shouldEnableKeychainSaving: false)
         }
 
         if profile.savePasswordInKeychain,
            let password = SSHPasswordKeychain.password(for: profile),
            !password.isEmpty {
-            return password
+            return SSHConnectionPasswordResult(password: password, shouldEnableKeychainSaving: false)
         }
 
         guard let result = requestPassword(
@@ -112,7 +117,10 @@ enum SSHPasswordPrompter {
             SSHPasswordKeychain.save(result.password, for: profile)
         }
 
-        return result.password
+        return SSHConnectionPasswordResult(
+            password: result.password,
+            shouldEnableKeychainSaving: result.saveInKeychain && !profile.savePasswordInKeychain
+        )
     }
 
     @discardableResult
