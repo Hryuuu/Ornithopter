@@ -268,13 +268,6 @@ private struct ServerDetailView: View {
         )
     }
 
-    private var usesCustomIdentityFile: Binding<Bool> {
-        Binding(
-            get: { profile.customIdentityFileEnabled },
-            set: { profile.customIdentityFileEnabled = $0 }
-        )
-    }
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -296,39 +289,43 @@ private struct ServerDetailView: View {
                     .textFieldStyle(.roundedBorder)
                     .padding(4)
                 } label: {
-                    Label("Default", systemImage: "server.rack")
+                    Text("Default")
                 }
 
                 GroupBox {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(alignment: .center, spacing: 12) {
-                            Label("Authentication", systemImage: "lock.shield")
+                            Text("Authentication")
 
                             Spacer()
 
                             Picker("", selection: $authenticationUsesPassword) {
                                 Text("Password").tag(true)
-                                Text("Public key").tag(false)
+                                Text("SSH key").tag(false)
                             }
                             .pickerStyle(.segmented)
                             .fixedSize()
                             .labelsHidden()
                         }
 
-                        if profile.passwordAuthentication {
-                            SettingsToggleRow(isOn: $profile.savePasswordInKeychain, title: "Save password in Keychain", systemImage: "lock")
+                        SettingsDivider()
 
-                            HStack {
+                        if profile.passwordAuthentication {
+                            SettingsToggleRow(isOn: $profile.savePasswordInKeychain, title: "Save password in Keychain")
+
+                            SettingsDivider()
+
+                            HStack(alignment: .center, spacing: 12) {
+                                SettingsHelpText(hasStoredKeychainPassword ? "Password is saved in Keychain." : "Password is not saved in Keychain.")
+
                                 Spacer()
+
                                 Button {
                                     if SSHPasswordPrompter.updateKeychainPassword(for: profile) {
                                         hasStoredKeychainPassword = true
                                     }
                                 } label: {
-                                    Label(
-                                        hasStoredKeychainPassword ? "Update Keychain Password..." : "Set Keychain Password...",
-                                        systemImage: "key.fill"
-                                    )
+                                    Text(hasStoredKeychainPassword ? "Edit..." : "Set...")
                                 }
                                 .controlSize(.small)
                                 .font(.caption)
@@ -338,30 +335,36 @@ private struct ServerDetailView: View {
                         }
 
                         if !profile.passwordAuthentication {
-                            SettingsToggleRow(isOn: usesCustomIdentityFile, title: "Use custom key file", systemImage: "folder")
-
-                            if usesCustomIdentityFile.wrappedValue {
-                                TextField("Key file path", text: $profile.identityFile)
+                            VStack(alignment: .leading, spacing: 6) {
+                                TextField("Private key file path", text: $profile.identityFile)
                                     .textFieldStyle(.roundedBorder)
-                                    .font(.system(.body, design: .monospaced))
-                                    .padding(.leading, 28)
+
+                                SettingsHelpText("If a path is entered, Ornithopter uses that private key. If empty, SSH uses keys from the default folder.")
                             }
                         }
 
-                        SettingsToggleRow(isOn: $profile.x11Forwarding, title: "X11 forwarding", systemImage: "display")
+                        SettingsDivider()
 
-                        SettingsToggleRow(isOn: $profile.x11TrustedForwarding, title: "Trusted forwarding (-Y)", systemImage: "lock.shield")
-                            .disabled(!profile.x11Forwarding)
-                            .opacity(profile.x11Forwarding ? 1 : 0.55)
-                            .help("Off uses -X. On uses -Y.")
+                        SettingsToggleRow(isOn: $profile.x11Forwarding, title: "X11 forwarding")
 
-                        SettingsToggleRow(isOn: $profile.hideHiddenFiles, title: "Hide hidden files", systemImage: "eye.slash")
+                        if profile.x11Forwarding {
+                            SettingsDivider()
 
-                        SettingsToggleRow(isOn: showsFileBrowser, title: "Show file browser", systemImage: "folder")
+                            SettingsToggleRow(isOn: $profile.x11TrustedForwarding, title: "Trusted forwarding (-Y)")
+                                .help("Off uses -X. On uses -Y.")
+                        }
+
+                        SettingsDivider()
+
+                        SettingsToggleRow(isOn: $profile.hideHiddenFiles, title: "Hide hidden files")
+
+                        SettingsDivider()
+
+                        SettingsToggleRow(isOn: showsFileBrowser, title: "Show file browser")
                     }
                     .padding(4)
                 } label: {
-                    Label("Options", systemImage: "checklist")
+                    Text("Options")
                 }
 
                 GroupBox {
@@ -374,7 +377,7 @@ private struct ServerDetailView: View {
                     .textFieldStyle(.roundedBorder)
                     .padding(4)
                 } label: {
-                    Label("Tags & Notes", systemImage: "tag")
+                    Text("Tags & Notes")
                 }
 
                 HStack {
@@ -455,14 +458,35 @@ private struct ServerDetailView: View {
     }
 }
 
+private struct SettingsDivider: View {
+    var body: some View {
+        Divider()
+            .opacity(0.65)
+    }
+}
+
+private struct SettingsHelpText: View {
+    let text: LocalizedStringKey
+
+    init(_ text: LocalizedStringKey) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 private struct SettingsToggleRow: View {
     @Binding var isOn: Bool
     let title: LocalizedStringKey
-    let systemImage: String
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            SettingsToggleLabel(title, systemImage: systemImage)
+            Text(title)
 
             Spacer()
 
@@ -472,26 +496,6 @@ private struct SettingsToggleRow: View {
                 .labelsHidden()
         }
         .frame(minHeight: 24, alignment: .center)
-    }
-}
-
-private struct SettingsToggleLabel: View {
-    let title: LocalizedStringKey
-    let systemImage: String
-
-    init(_ title: LocalizedStringKey, systemImage: String) {
-        self.title = title
-        self.systemImage = systemImage
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: systemImage)
-                .font(.body)
-                .frame(width: 18, alignment: .center)
-
-            Text(title)
-        }
     }
 }
 

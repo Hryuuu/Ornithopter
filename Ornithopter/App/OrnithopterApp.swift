@@ -199,43 +199,13 @@ private struct OrnithopterSettingsView: View {
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.body, design: .monospaced))
                     }
-                }
-                .padding(4)
-            } label: {
-                Label("Default text editor", systemImage: "pencil")
-            }
 
-            GroupBox {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Default SSH key file")
+                    Divider()
+
+                    Text("Supported file formats")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
 
-                    TextField("", text: $defaultIdentityFile)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-
-                    Text("Used as the initial SSH key file value when creating a new server.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(4)
-            } label: {
-                Label("New server defaults", systemImage: "key")
-            }
-
-            GroupBox {
-                SettingsSwitchRow(
-                    title: "Close terminal tabs after normal exit",
-                    isOn: $autoCloseTerminalTabOnNormalExit
-                )
-                    .padding(4)
-            } label: {
-                Label("Terminal", systemImage: "terminal")
-            }
-
-            GroupBox {
-                VStack(alignment: .leading, spacing: 8) {
                     TextEditor(text: $supportedTextFilePatterns)
                         .font(.system(.body, design: .monospaced))
                         .frame(minHeight: 120)
@@ -248,7 +218,36 @@ private struct OrnithopterSettingsView: View {
                 }
                 .padding(4)
             } label: {
-                Label("Supported file formats", systemImage: "doc.text")
+                Text("Editing")
+            }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Default SSH private key file")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    TextField("", text: $defaultIdentityFile)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+
+                    Text("Used as the default SSH private key file path when creating a new server.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(4)
+            } label: {
+                Text("New server defaults")
+            }
+
+            GroupBox {
+                SettingsSwitchRow(
+                    title: "Close terminal tabs after normal exit",
+                    isOn: $autoCloseTerminalTabOnNormalExit
+                )
+                    .padding(4)
+            } label: {
+                Text("Terminal")
             }
 
             HStack {

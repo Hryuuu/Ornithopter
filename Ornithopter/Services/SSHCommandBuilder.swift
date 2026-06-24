@@ -133,7 +133,7 @@ enum SSHCommandBuilder {
     }
 
     private nonisolated static func resolvedIdentityFile(for profile: ServerProfile) -> String? {
-        guard !profile.passwordAuthentication, profile.customIdentityFileEnabled else {
+        guard !profile.passwordAuthentication else {
             return nil
         }
 
