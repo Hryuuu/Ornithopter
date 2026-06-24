@@ -41,12 +41,6 @@ private struct NameValidation {
     }
 }
 
-private struct RemoteDragContext {
-    let profile: ServerProfile
-    let sessionPassword: String?
-    let items: [RemoteFileItem]
-}
-
 @MainActor
 final class RemoteFileStore: ObservableObject {
     @Published private(set) var currentPath: String
@@ -63,13 +57,9 @@ final class RemoteFileStore: ObservableObject {
     @Published private(set) var status = NSLocalizedString("Not loaded", comment: "")
 
     static let acceptedDropTypes: [UTType] = [.item, .fileURL]
-    private static var sharedDragContext: RemoteDragContext?
-    private static let commandSelectionGraceInterval: TimeInterval = 1
 
     private let profile: ServerProfile
     private let sessionPassword: String?
-    private var draggedRemoteItems: [RemoteFileItem] = []
-    private var lastCommandSelectionAt: Date?
 
     private nonisolated static func localized(_ key: String) -> String {
         NSLocalizedString(key, comment: "")
@@ -233,28 +223,12 @@ final class RemoteFileStore: ObservableObject {
             }
         } else {
             selectedPaths.removeAll()
-            lastCommandSelectionAt = nil
+            selectedPaths.insert(item.path)
         }
     }
 
     func clearSelection() {
         selectedPaths.removeAll()
-        lastCommandSelectionAt = nil
-    }
-
-    func shouldExtendSelection(commandPressed: Bool) -> Bool {
-        let now = Date()
-
-        if commandPressed {
-            lastCommandSelectionAt = now
-            return true
-        }
-
-        guard let lastCommandSelectionAt else {
-            return false
-        }
-
-        return now.timeIntervalSince(lastCommandSelectionAt) <= Self.commandSelectionGraceInterval
     }
 
     func actionItems(for item: RemoteFileItem) -> [RemoteFileItem] {
@@ -540,9 +514,13 @@ final class RemoteFileStore: ObservableObject {
         let provider = NSItemProvider()
         let items = dragItems(for: item)
         provider.suggestedName = Self.dragSuggestedName(for: items, draggedItem: item)
-        draggedRemoteItems = items
-        Self.sharedDragContext = RemoteDragContext(profile: profile, sessionPassword: sessionPassword, items: items)
-        clearDraggedRemoteItemLater(item)
+        let token = AppDragRegistry.beginRemoteFileDrag(
+            payload: RemoteFileDragPayload(
+                profile: profile,
+                sessionPassword: sessionPassword,
+                items: items
+            )
+        )
 
         let typeIdentifier = Self.dragTypeIdentifier(for: items, draggedItem: item)
 
@@ -566,6 +544,10 @@ final class RemoteFileStore: ObservableObject {
                 case .failure(let error):
                     completion(nil, false, error)
                 }
+
+                Task { @MainActor in
+                    AppDragRegistry.clearActiveRemoteFileDrag(token)
+                }
             }
 
             return progress
@@ -582,30 +564,33 @@ final class RemoteFileStore: ObservableObject {
         upload(urls, to: remoteDirectory)
     }
 
-    func handleDropProviders(_ providers: [NSItemProvider], to remoteDirectory: String) -> Bool {
-        if !draggedRemoteItems.isEmpty {
-            let items = draggedRemoteItems
-            draggedRemoteItems = []
-            Self.sharedDragContext = nil
-            move(items, to: remoteDirectory)
-            return true
-        }
+    func uploadDroppedURLs(_ urls: [URL], to remoteDirectory: String) {
+        upload(urls, to: remoteDirectory)
+    }
 
-        if let dragContext = Self.sharedDragContext,
-           dragContext.profile.id != profile.id {
-            Self.sharedDragContext = nil
-            copyFromRemote(dragContext, to: remoteDirectory)
-            return true
-        }
-
-        let fileURLProviders = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
-        guard !fileURLProviders.isEmpty else {
+    func handleActiveRemoteFileDrop(to remoteDirectory: String) -> Bool {
+        guard let activeDrag = AppDragRegistry.activeRemoteFilePayload else {
             return false
         }
 
-        for provider in fileURLProviders {
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                guard let url = Self.fileURL(from: item) else {
+        handleRemoteFileDrop(token: activeDrag.token, payload: activeDrag.payload, to: remoteDirectory)
+        return true
+    }
+
+    func handleDropProviders(_ providers: [NSItemProvider], to remoteDirectory: String) -> Bool {
+        if AppDragRegistry.activeRemoteFilePayload != nil {
+            return handleActiveRemoteFileDrop(to: remoteDirectory)
+        }
+
+        let localFileProviders = providers.filter(Self.canLoadLocalFileURL)
+
+        guard !localFileProviders.isEmpty else {
+            return false
+        }
+
+        for provider in localFileProviders {
+            Self.loadLocalFileURL(from: provider) { url in
+                guard let url else {
                     return
                 }
 
@@ -618,17 +603,35 @@ final class RemoteFileStore: ObservableObject {
         return true
     }
 
-    private func clearDraggedRemoteItemLater(_ item: RemoteFileItem) {
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 30_000_000_000)
-            if draggedRemoteItems.contains(where: { $0.path == item.path }) {
-                draggedRemoteItems = []
-                Self.sharedDragContext = nil
+    private nonisolated static func canLoadLocalFileURL(_ provider: NSItemProvider) -> Bool {
+        provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+            || provider.canLoadObject(ofClass: NSURL.self)
+    }
+
+    private nonisolated static func loadLocalFileURL(from provider: NSItemProvider, completion: @escaping (URL?) -> Void) {
+        if provider.canLoadObject(ofClass: NSURL.self) {
+            provider.loadObject(ofClass: NSURL.self) { object, _ in
+                completion((object as? URL) ?? (object as? NSURL).map { $0 as URL })
             }
+            return
+        }
+
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+            completion(fileURL(from: item))
         }
     }
 
-    private func copyFromRemote(_ context: RemoteDragContext, to remoteDirectory: String) {
+    private func handleRemoteFileDrop(token: UUID, payload dragContext: RemoteFileDragPayload, to remoteDirectory: String) {
+        AppDragRegistry.endRemoteFileDrag(token)
+
+        if dragContext.profile.id == profile.id {
+            move(dragContext.items, to: remoteDirectory)
+        } else {
+            copyFromRemote(dragContext, to: remoteDirectory)
+        }
+    }
+
+    private func copyFromRemote(_ context: RemoteFileDragPayload, to remoteDirectory: String) {
         let itemsToCopy = uniqueItems(context.items)
         guard !itemsToCopy.isEmpty else {
             return
@@ -1004,6 +1007,11 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func uploadItems(_ urls: [URL], to remoteDirectory: String, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
+        let scopedURLs = urls.filter { $0.startAccessingSecurityScopedResource() }
+        defer {
+            scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
+        }
+
         let commands = urls.map { url in
             let remoteTarget = joined(remoteDirectory, url.lastPathComponent)
             let option = isDirectory(url) ? "-R " : ""
@@ -1618,6 +1626,10 @@ final class RemoteFileStore: ObservableObject {
             return url
         }
 
+        if let url = item as? NSURL {
+            return url as URL
+        }
+
         if let data = item as? Data,
            let url = URL(dataRepresentation: data, relativeTo: nil) {
             return url
@@ -1799,6 +1811,232 @@ private final class EscapeKeyHandlerView: NSView {
     }
 }
 
+private struct RowClickCaptureView: NSViewRepresentable {
+    struct Click {
+        let modifierFlags: NSEvent.ModifierFlags
+        let clickCount: Int
+    }
+
+    let action: (Click) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> RowClickCaptureNSView {
+        let view = RowClickCaptureNSView()
+        context.coordinator.view = view
+        context.coordinator.installMonitorsIfNeeded()
+        return view
+    }
+
+    func updateNSView(_ nsView: RowClickCaptureNSView, context: Context) {
+        context.coordinator.view = nsView
+        context.coordinator.action = action
+        context.coordinator.installMonitorsIfNeeded()
+    }
+
+    final class Coordinator {
+        var action: (Click) -> Void
+        weak var view: RowClickCaptureNSView?
+        private var mouseDownMonitor: Any?
+        private var mouseUpMonitor: Any?
+        private var mouseDownLocation: NSPoint?
+        private var mouseDownModifierFlags: NSEvent.ModifierFlags = []
+
+        init(action: @escaping (Click) -> Void) {
+            self.action = action
+        }
+
+        func installMonitorsIfNeeded() {
+            guard mouseDownMonitor == nil, mouseUpMonitor == nil else {
+                return
+            }
+
+            mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                self?.handleMouseDown(event)
+                return event
+            }
+            mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+                self?.handleMouseUp(event)
+                return event
+            }
+        }
+
+        private func handleMouseDown(_ event: NSEvent) {
+            guard contains(event) else {
+                mouseDownLocation = nil
+                return
+            }
+
+            mouseDownLocation = event.locationInWindow
+            mouseDownModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        }
+
+        private func handleMouseUp(_ event: NSEvent) {
+            guard let mouseDownLocation else {
+                return
+            }
+
+            defer {
+                self.mouseDownLocation = nil
+            }
+
+            let distance = hypot(event.locationInWindow.x - mouseDownLocation.x, event.locationInWindow.y - mouseDownLocation.y)
+            guard distance <= 4, contains(event) else {
+                return
+            }
+
+            action(
+                Click(
+                    modifierFlags: mouseDownModifierFlags,
+                    clickCount: event.clickCount
+                )
+            )
+        }
+
+        private func contains(_ event: NSEvent) -> Bool {
+            guard let view,
+                  event.window === view.window else {
+                return false
+            }
+
+            let location = view.convert(event.locationInWindow, from: nil)
+            return view.bounds.contains(location)
+        }
+
+        deinit {
+            if let mouseDownMonitor {
+                NSEvent.removeMonitor(mouseDownMonitor)
+            }
+            if let mouseUpMonitor {
+                NSEvent.removeMonitor(mouseUpMonitor)
+            }
+        }
+    }
+}
+
+private final class RowClickCaptureNSView: NSView {
+    override var acceptsFirstResponder: Bool {
+        false
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+private struct LocalFileDropTarget: NSViewRepresentable {
+    @Binding var isTargeted: Bool
+    let action: ([URL]) -> Void
+    let remoteAction: () -> Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isTargeted: $isTargeted, action: action, remoteAction: remoteAction)
+    }
+
+    func makeNSView(context: Context) -> LocalFileDropTargetView {
+        let view = LocalFileDropTargetView()
+        view.coordinator = context.coordinator
+        view.registerForDraggedTypes([.fileURL, NSPasteboard.PasteboardType(UTType.item.identifier)])
+        return view
+    }
+
+    func updateNSView(_ nsView: LocalFileDropTargetView, context: Context) {
+        context.coordinator.isTargeted = $isTargeted
+        context.coordinator.action = action
+        context.coordinator.remoteAction = remoteAction
+        nsView.coordinator = context.coordinator
+    }
+
+    final class Coordinator {
+        var isTargeted: Binding<Bool>
+        var action: ([URL]) -> Void
+        var remoteAction: () -> Bool
+
+        init(isTargeted: Binding<Bool>, action: @escaping ([URL]) -> Void, remoteAction: @escaping () -> Bool) {
+            self.isTargeted = isTargeted
+            self.action = action
+            self.remoteAction = remoteAction
+        }
+    }
+}
+
+private final class LocalFileDropTargetView: NSView {
+    weak var coordinator: LocalFileDropTarget.Coordinator?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        switch NSApp.currentEvent?.type {
+        case .leftMouseDragged, .leftMouseUp:
+            return self
+        default:
+            return nil
+        }
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if isInternalRemoteDrag(sender) {
+            coordinator?.isTargeted.wrappedValue = true
+            return .move
+        }
+
+        guard !localFileURLs(from: sender).isEmpty else {
+            return []
+        }
+
+        coordinator?.isTargeted.wrappedValue = true
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if isInternalRemoteDrag(sender) {
+            return .move
+        }
+
+        return localFileURLs(from: sender).isEmpty ? NSDragOperation() : .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        coordinator?.isTargeted.wrappedValue = false
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if isInternalRemoteDrag(sender) {
+            coordinator?.isTargeted.wrappedValue = false
+            return coordinator?.remoteAction() ?? false
+        }
+
+        let urls = localFileURLs(from: sender)
+        coordinator?.isTargeted.wrappedValue = false
+        guard !urls.isEmpty else {
+            return false
+        }
+
+        coordinator?.action(urls)
+        return true
+    }
+
+    override func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        coordinator?.isTargeted.wrappedValue = false
+    }
+
+    private func localFileURLs(from sender: NSDraggingInfo) -> [URL] {
+        let pasteboard = sender.draggingPasteboard
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true
+        ]
+
+        let objects = pasteboard.readObjects(forClasses: [NSURL.self], options: options) ?? []
+        return objects.compactMap { object in
+            (object as? URL) ?? (object as? NSURL).map { $0 as URL }
+        }
+    }
+
+    private func isInternalRemoteDrag(_ sender: NSDraggingInfo) -> Bool {
+        sender.draggingSource != nil && AppDragRegistry.activeRemoteFilePayload != nil
+    }
+}
+
 private struct RemoteFileTreeRow: View {
     let item: RemoteFileItem
     let depth: Int
@@ -1911,29 +2149,24 @@ private struct RemoteFileTreeRow: View {
             .onHover { hovering in
                 isHovering = hovering
             }
-            .onTapGesture(count: 2) {
-                if !isRenaming, isEditableTextFile {
-                    store.select(item, extending: false)
-                    editAction(item)
+            .background(
+                RowClickCaptureView { click in
+                    handleRowClick(click)
                 }
-            }
-            .onTapGesture {
-                if !isRenaming {
-                    let isExtendingSelection = store.shouldExtendSelection(
-                        commandPressed: NSEvent.modifierFlags.contains(.command)
-                    )
-                    store.select(item, extending: isExtendingSelection)
-                    if !isExtendingSelection {
-                        store.open(item)
-                    }
-                }
-            }
+            )
             .onDrag {
                 store.dragItemProvider(for: item)
             }
             .onDrop(of: RemoteFileStore.acceptedDropTypes, isTargeted: $isDropTarget) { providers in
                 store.handleDropProviders(providers, to: uploadTarget)
             }
+            .overlay(
+                LocalFileDropTarget(isTargeted: $isDropTarget) { urls in
+                    store.uploadDroppedURLs(urls, to: uploadTarget)
+                } remoteAction: {
+                    store.handleActiveRemoteFileDrop(to: uploadTarget)
+                }
+            )
             .contextMenu {
                 if isEditableTextFile {
                     Button {
@@ -2024,6 +2257,28 @@ private struct RemoteFileTreeRow: View {
                     )
                 }
             }
+        }
+    }
+
+    private func handleRowClick(_ click: RowClickCaptureView.Click) {
+        guard !isRenaming else {
+            return
+        }
+
+        if click.clickCount >= 2 {
+            guard item.isDirectory || isEditableTextFile else {
+                return
+            }
+
+            store.select(item, extending: false)
+            editAction(item)
+            return
+        }
+
+        let isExtendingSelection = click.modifierFlags.contains(.command)
+        store.select(item, extending: isExtendingSelection)
+        if !isExtendingSelection {
+            store.open(item)
         }
     }
 

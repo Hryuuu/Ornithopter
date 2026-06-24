@@ -9,18 +9,31 @@ import UniformTypeIdentifiers
 
 enum SSHSessionWindowManager {
     private static var windows: [NSWindow] = []
+    private static var windowsByID: [UUID: NSWindow] = [:]
+    private static var registrations: [UUID: TerminalWindowRegistration] = [:]
     private static let initialWindowSize = NSSize(width: 1120, height: 720)
     private static let minimumWindowSize = NSSize(width: 920, height: 560)
 
     @discardableResult
     static func open(profile: ServerProfile) -> Bool {
-        let sessionPassword = SSHPasswordPrompter.passwordForConnection(profile: profile)
+        openWindow(profile: profile)
+    }
+
+    @discardableResult
+    private static func openWindow(profile: ServerProfile, sessionPassword providedPassword: String? = nil, initialSession: TerminalSession? = nil, at screenPoint: NSPoint? = nil) -> Bool {
+        let sessionPassword = providedPassword ?? SSHPasswordPrompter.passwordForConnection(profile: profile)
         if profile.passwordAuthentication && sessionPassword == nil {
             return false
         }
 
+        let windowID = UUID()
         let controller = NSHostingController(
-            rootView: ConnectionWindowView(profile: profile, sessionPassword: sessionPassword)
+            rootView: ConnectionWindowView(
+                windowID: windowID,
+                profile: profile,
+                sessionPassword: sessionPassword,
+                initialSession: initialSession
+            )
         )
         let window = NSWindow(contentViewController: controller)
         window.title = profile.displayName
@@ -29,30 +42,120 @@ enum SSHSessionWindowManager {
         window.minSize = minimumWindowSize
         window.contentMinSize = minimumWindowSize
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.center()
+        if let screenPoint {
+            window.setFrameTopLeftPoint(NSPoint(x: screenPoint.x - 80, y: screenPoint.y + 40))
+        } else {
+            window.center()
+        }
         windows.append(window)
+        windowsByID[windowID] = window
 
         NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: window,
             queue: .main
         ) { _ in
+            registrations[windowID]?.closeAllSessions()
+            registrations[windowID] = nil
+            windowsByID[windowID] = nil
             windows.removeAll { $0 === window }
         }
 
         window.makeKeyAndOrderFront(nil)
         return true
     }
+
+    fileprivate static func registerWindow(
+        id: UUID,
+        profile: ServerProfile,
+        sessionPassword: String?,
+        detachSession: @escaping (TerminalPane.ID, TerminalSession.ID) -> TerminalSession?,
+        insertSession: @escaping (TerminalSession, TerminalPane.ID, TerminalSession.ID?) -> Void,
+        showDropError: @escaping (String) -> Void,
+        closeAllSessions: @escaping () -> Void
+    ) {
+        registrations[id] = TerminalWindowRegistration(
+            profile: profile,
+            sessionPassword: sessionPassword,
+            detachSession: detachSession,
+            insertSession: insertSession,
+            showDropError: showDropError,
+            closeAllSessions: closeAllSessions
+        )
+    }
+
+    fileprivate static func unregisterWindow(id: UUID) {
+        registrations[id] = nil
+    }
+
+    fileprivate static func moveTerminalSession(_ context: TerminalDragContext, to targetWindowID: UUID, targetPaneID: TerminalPane.ID, before targetSessionID: TerminalSession.ID?) -> Bool {
+        guard context.windowID != targetWindowID else {
+            return false
+        }
+
+        guard let source = registrations[context.windowID],
+              let target = registrations[targetWindowID] else {
+            return false
+        }
+
+        guard source.profile.id == target.profile.id else {
+            target.showDropError(NSLocalizedString("Cannot move terminal tab to a different server.", comment: "terminal tab cross-server drop error"))
+            return true
+        }
+
+        guard let session = source.detachSession(context.paneID, context.sessionID) else {
+            return false
+        }
+
+        target.insertSession(session, targetPaneID, targetSessionID)
+        return true
+    }
+
+    fileprivate static func detachTerminalSessionToNewWindow(_ context: TerminalDragContext, at screenPoint: NSPoint) {
+        guard let source = registrations[context.windowID],
+              let session = source.detachSession(context.paneID, context.sessionID) else {
+            return
+        }
+
+        if !openWindow(profile: source.profile, sessionPassword: source.sessionPassword, initialSession: session, at: screenPoint) {
+            source.insertSession(session, context.paneID, nil)
+        }
+    }
+
+    fileprivate static func isPointInsideSessionWindow(_ screenPoint: NSPoint) -> Bool {
+        windowsByID.values.contains { window in
+            window.isVisible && window.frame.contains(screenPoint)
+        }
+    }
+}
+
+private struct TerminalWindowRegistration {
+    let profile: ServerProfile
+    let sessionPassword: String?
+    let detachSession: (TerminalPane.ID, TerminalSession.ID) -> TerminalSession?
+    let insertSession: (TerminalSession, TerminalPane.ID, TerminalSession.ID?) -> Void
+    let showDropError: (String) -> Void
+    let closeAllSessions: () -> Void
 }
 
 struct ConnectionWindowView: View {
+    let windowID: UUID
     let profile: ServerProfile
     let sessionPassword: String?
     @AppStorage("defaultTextEditor") private var defaultTextEditor = AppPreferenceDefaults.textEditor
     @AppStorage("customTextEditor") private var customTextEditor = AppPreferenceDefaults.customTextEditor
+    @AppStorage("autoCloseTerminalTabOnNormalExit") private var autoCloseTerminalTabOnNormalExit = AppPreferenceDefaults.autoCloseTerminalTabOnNormalExit
     @State private var isExplorerVisible = true
-    @State private var terminalLayout = TerminalLayout()
+    @State private var terminalLayout: TerminalLayout
     @State private var activePaneID: TerminalPane.ID?
+    @State private var dropErrorMessage: String?
+
+    fileprivate init(windowID: UUID, profile: ServerProfile, sessionPassword: String?, initialSession: TerminalSession? = nil) {
+        self.windowID = windowID
+        self.profile = profile
+        self.sessionPassword = sessionPassword
+        _terminalLayout = State(initialValue: TerminalLayout(initialSession: initialSession))
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -65,7 +168,7 @@ struct ConnectionWindowView: View {
                             isExplorerVisible = false
                         },
                         editAction: { item in
-                            openRemoteFileInEditor(item)
+                            openRemoteItemInTerminal(item)
                         }
                     )
                     .frame(width: 240)
@@ -90,10 +193,12 @@ struct ConnectionWindowView: View {
             }
 
             TerminalLayoutView(
+                windowID: windowID,
                 profile: profile,
                 sessionPassword: sessionPassword,
                 layout: terminalLayout,
                 activePaneID: activePaneID,
+                dropErrorMessage: dropErrorMessage,
                 confirmReconnect: confirmReconnect,
                 actions: TerminalLayoutActions(
                     activatePane: { activePaneID = $0 },
@@ -102,8 +207,12 @@ struct ConnectionWindowView: View {
                     selectSession: selectSession,
                     splitPane: splitPane,
                     moveSession: moveSession,
+                    detachSession: detachSession,
+                    insertSession: insertSession,
+                    scheduleNormalExitClose: scheduleNormalExitClose,
                     reconnectSession: reconnectSession,
-                    updateSessionTitle: updateSessionTitle
+                    updateSessionTitle: updateSessionTitle,
+                    showDropError: showDropError
                 )
             )
             .frame(minWidth: 620)
@@ -113,8 +222,18 @@ struct ConnectionWindowView: View {
             if activePaneID == nil {
                 activePaneID = terminalLayout.firstPaneID
             }
+            SSHSessionWindowManager.registerWindow(
+                id: windowID,
+                profile: profile,
+                sessionPassword: sessionPassword,
+                detachSession: detachSession,
+                insertSession: insertSession,
+                showDropError: showDropError,
+                closeAllSessions: closeAllSessions
+            )
         }
         .onDisappear {
+            SSHSessionWindowManager.unregisterWindow(id: windowID)
             terminalLayout.terminateAll()
         }
     }
@@ -138,11 +257,16 @@ struct ConnectionWindowView: View {
         activePaneID = paneID
     }
 
-    private func openRemoteFileInEditor(_ item: RemoteFileItem) {
-        guard !item.isDirectory else {
+    private func openRemoteItemInTerminal(_ item: RemoteFileItem) {
+        if item.isDirectory {
+            openRemoteFolderInTerminal(item)
             return
         }
 
+        openRemoteFileInEditor(item)
+    }
+
+    private func openRemoteFileInEditor(_ item: RemoteFileItem) {
         let editor = AppPreferences.effectiveTextEditor(defaultEditor: defaultTextEditor, customEditor: customTextEditor)
         let command = editorStartupCommand(editor: editor, path: item.path)
         let paneID = terminalLayout.validPaneID(preferred: activePaneID)
@@ -154,12 +278,27 @@ struct ConnectionWindowView: View {
         activePaneID = paneID
     }
 
+    private func openRemoteFolderInTerminal(_ item: RemoteFileItem) {
+        let paneID = terminalLayout.validPaneID(preferred: activePaneID)
+        terminalLayout.addSession(
+            to: paneID,
+            title: item.name,
+            startupCommand: folderStartupCommand(path: item.path)
+        )
+        activePaneID = paneID
+    }
+
     private func editorStartupCommand(editor: String, path: String) -> String {
         let parent = parentPath(for: path)
         let filename = filename(for: path)
         let quotedParent = SSHCommandBuilder.shellQuotedArgument(parent)
         let quotedFilename = SSHCommandBuilder.shellQuotedArgument(filename)
         return "cd \(quotedParent) && \(editor) \(quotedFilename); exec \"${SHELL:-/bin/sh}\""
+    }
+
+    private func folderStartupCommand(path: String) -> String {
+        let quotedPath = SSHCommandBuilder.shellQuotedArgument(path)
+        return "cd \(quotedPath); exec \"${SHELL:-/bin/sh}\""
     }
 
     private func parentPath(for path: String) -> String {
@@ -189,6 +328,19 @@ struct ConnectionWindowView: View {
         activePaneID = terminalLayout.validPaneID(preferred: paneID)
     }
 
+    private func scheduleNormalExitClose(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID) {
+        guard autoCloseTerminalTabOnNormalExit else {
+            return
+        }
+
+        guard terminalLayout.containsSession(sessionID, in: paneID) else {
+            return
+        }
+
+        terminalLayout.removeExitedSession(sessionID, in: paneID)
+        activePaneID = terminalLayout.validPaneID(preferred: paneID)
+    }
+
     private func selectSession(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID) {
         terminalLayout.selectSession(sessionID, in: paneID)
         activePaneID = paneID
@@ -211,6 +363,17 @@ struct ConnectionWindowView: View {
         activePaneID = targetPaneID
     }
 
+    private func detachSession(_ paneID: TerminalPane.ID, _ sessionID: TerminalSession.ID) -> TerminalSession? {
+        let session = terminalLayout.detachSession(sessionID, from: paneID)
+        activePaneID = terminalLayout.validPaneID(preferred: paneID)
+        return session
+    }
+
+    private func insertSession(_ session: TerminalSession, into paneID: TerminalPane.ID, before targetSessionID: TerminalSession.ID?) {
+        terminalLayout.insertSession(session, into: paneID, before: targetSessionID)
+        activePaneID = paneID
+    }
+
     private func reconnectSession(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID) {
         terminalLayout.reconnectSession(sessionID, in: paneID)
         activePaneID = paneID
@@ -218,6 +381,20 @@ struct ConnectionWindowView: View {
 
     private func updateSessionTitle(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID, title: String) {
         terminalLayout.updateSessionTitle(sessionID, in: paneID, title: displayTitle(from: title))
+    }
+
+    private func showDropError(_ message: String) {
+        dropErrorMessage = message
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if dropErrorMessage == message {
+                dropErrorMessage = nil
+            }
+        }
+    }
+
+    private func closeAllSessions() {
+        terminalLayout.terminateAll()
     }
 
     private func displayTitle(from rawTitle: String) -> String {
@@ -284,9 +461,17 @@ private enum TerminalSplitAxis: Equatable {
 }
 
 private struct TerminalLayout: Equatable {
-    var primary = TerminalPane()
+    var primary: TerminalPane
     var secondary: TerminalPane?
     var splitAxis: TerminalSplitAxis?
+
+    init(initialSession: TerminalSession? = nil) {
+        if let initialSession {
+            primary = TerminalPane(sessions: [initialSession])
+        } else {
+            primary = TerminalPane()
+        }
+    }
 
     var firstPaneID: TerminalPane.ID? {
         primary.id
@@ -335,7 +520,7 @@ private struct TerminalLayout: Equatable {
             }
 
             let wasSelected = pane.selectedSessionID == sessionID
-            pane.sessions[index].runtime.terminate()
+            pane.sessions[index].runtime.closeGracefully()
             pane.sessions.remove(at: index)
 
             if pane.sessions.isEmpty {
@@ -347,6 +532,38 @@ private struct TerminalLayout: Equatable {
         }
 
         collapseEmptySplitPane()
+    }
+
+    mutating func removeExitedSession(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID) {
+        updatePane(paneID) { pane in
+            guard let index = pane.sessions.firstIndex(where: { $0.id == sessionID }) else {
+                return
+            }
+
+            let wasSelected = pane.selectedSessionID == sessionID
+            pane.sessions[index].runtime.terminate()
+            pane.sessions.remove(at: index)
+
+            if pane.sessions.isEmpty {
+                pane.selectedSessionID = nil
+            } else if wasSelected {
+                let nextIndex = min(index, pane.sessions.count - 1)
+                pane.selectedSessionID = pane.sessions[nextIndex].id
+            }
+        }
+        collapseEmptySplitPane()
+    }
+
+    func containsSession(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID) -> Bool {
+        if primary.id == paneID {
+            return primary.sessions.contains { $0.id == sessionID }
+        }
+
+        if let secondary, secondary.id == paneID {
+            return secondary.sessions.contains { $0.id == sessionID }
+        }
+
+        return false
     }
 
     mutating func selectSession(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID) {
@@ -381,6 +598,24 @@ private struct TerminalLayout: Equatable {
         }
 
         updatePane(targetPaneID) { pane in
+            if let targetSessionID,
+               let targetIndex = pane.sessions.firstIndex(where: { $0.id == targetSessionID }) {
+                pane.sessions.insert(session, at: targetIndex)
+            } else {
+                pane.sessions.append(session)
+            }
+            pane.selectedSessionID = session.id
+        }
+    }
+
+    mutating func detachSession(_ sessionID: TerminalSession.ID, from paneID: TerminalPane.ID) -> TerminalSession? {
+        let session = removeSession(sessionID, from: paneID)
+        collapseEmptySplitPane()
+        return session
+    }
+
+    mutating func insertSession(_ session: TerminalSession, into paneID: TerminalPane.ID, before targetSessionID: TerminalSession.ID?) {
+        updatePane(paneID) { pane in
             if let targetSessionID,
                let targetIndex = pane.sessions.firstIndex(where: { $0.id == targetSessionID }) {
                 pane.sessions.insert(session, at: targetIndex)
@@ -469,8 +704,8 @@ private struct TerminalLayout: Equatable {
     }
 
     func terminateAll() {
-        primary.sessions.forEach { $0.runtime.terminate() }
-        secondary?.sessions.forEach { $0.runtime.terminate() }
+        primary.sessions.forEach { $0.runtime.closeGracefully() }
+        secondary?.sessions.forEach { $0.runtime.closeGracefully() }
     }
 }
 
@@ -481,86 +716,251 @@ private struct TerminalLayoutActions {
     let selectSession: (TerminalSession.ID, TerminalPane.ID) -> Void
     let splitPane: (TerminalPane.ID, TerminalSplitAxis) -> Void
     let moveSession: (TerminalSession.ID, TerminalPane.ID, TerminalPane.ID, TerminalSession.ID?) -> Void
+    let detachSession: (TerminalPane.ID, TerminalSession.ID) -> TerminalSession?
+    let insertSession: (TerminalSession, TerminalPane.ID, TerminalSession.ID?) -> Void
+    let scheduleNormalExitClose: (TerminalSession.ID, TerminalPane.ID) -> Void
     let reconnectSession: (TerminalSession.ID, TerminalPane.ID) -> Void
     let updateSessionTitle: (TerminalSession.ID, TerminalPane.ID, String) -> Void
+    let showDropError: (String) -> Void
 }
 
 private struct TerminalDragContext {
+    let windowID: UUID
     let paneID: TerminalPane.ID
     let sessionID: TerminalSession.ID
 }
 
 private enum TerminalTabDragStore {
-    static let acceptedTypes: [UTType] = [.plainText]
+    static let acceptedTypes: [UTType] = [AppDragTypes.terminalTab]
     @MainActor static var context: TerminalDragContext?
+    @MainActor private static var token: UUID?
 
     @MainActor
-    static func begin(_ dragContext: TerminalDragContext) {
+    static func begin(_ dragContext: TerminalDragContext) -> UUID {
         context = dragContext
+        let token = UUID()
+        self.token = token
+        return token
     }
 
     @MainActor
     static func clear() {
         context = nil
+        token = nil
+    }
+
+    @MainActor
+    static func context(for dragToken: UUID) -> TerminalDragContext? {
+        guard token == dragToken else {
+            return nil
+        }
+
+        return context
+    }
+
+    @MainActor
+    static func finishDrag(token dragToken: UUID, at screenPoint: NSPoint) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard let context = context(for: dragToken) else {
+                return
+            }
+
+            clear()
+            guard !SSHSessionWindowManager.isPointInsideSessionWindow(screenPoint) else {
+                return
+            }
+
+            SSHSessionWindowManager.detachTerminalSessionToNewWindow(context, at: screenPoint)
+        }
+    }
+
+}
+
+private struct TerminalTabDragSource: NSViewRepresentable {
+    let context: TerminalDragContext
+    let onClick: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(context: context, onClick: onClick)
+    }
+
+    func makeNSView(context: Context) -> TerminalTabDragSourceView {
+        let view = TerminalTabDragSourceView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ nsView: TerminalTabDragSourceView, context: Context) {
+        context.coordinator.context = self.context
+        context.coordinator.onClick = onClick
+        nsView.coordinator = context.coordinator
+    }
+
+    final class Coordinator: NSObject, NSDraggingSource {
+        var context: TerminalDragContext
+        var onClick: () -> Void
+        private var activeToken: UUID?
+
+        init(context: TerminalDragContext, onClick: @escaping () -> Void) {
+            self.context = context
+            self.onClick = onClick
+        }
+
+        func beginDrag(from view: NSView, with event: NSEvent) {
+            let token = TerminalTabDragStore.begin(context)
+            activeToken = token
+
+            let pasteboardItem = NSPasteboardItem()
+            pasteboardItem.setString(token.uuidString, forType: .string)
+
+            let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
+            draggingItem.setDraggingFrame(view.bounds, contents: dragPreviewImage())
+            view.beginDraggingSession(with: [draggingItem], event: event, source: self)
+        }
+
+        func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+            .move
+        }
+
+        func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
+            true
+        }
+
+        func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+            guard let activeToken else {
+                return
+            }
+
+            self.activeToken = nil
+            TerminalTabDragStore.finishDrag(token: activeToken, at: screenPoint)
+        }
+
+        private func dragPreviewImage() -> NSImage {
+            let size = NSSize(width: 12, height: 30)
+            let image = NSImage(size: size)
+            image.lockFocus()
+            NSColor.labelColor.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 5, y: 4, width: 2, height: 22), xRadius: 1, yRadius: 1).fill()
+            image.unlockFocus()
+            return image
+        }
+    }
+}
+
+private final class TerminalTabDragSourceView: NSView {
+    weak var coordinator: TerminalTabDragSource.Coordinator?
+    private var mouseDownEvent: NSEvent?
+    private var mouseDownLocation: NSPoint?
+    private var didStartDrag = false
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownEvent = event
+        mouseDownLocation = event.locationInWindow
+        didStartDrag = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !didStartDrag,
+              let mouseDownEvent,
+              let mouseDownLocation else {
+            return
+        }
+
+        let distance = hypot(event.locationInWindow.x - mouseDownLocation.x, event.locationInWindow.y - mouseDownLocation.y)
+        guard distance >= 4 else {
+            return
+        }
+
+        didStartDrag = true
+        coordinator?.beginDrag(from: self, with: mouseDownEvent)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer {
+            mouseDownEvent = nil
+            mouseDownLocation = nil
+            didStartDrag = false
+        }
+
+        if !didStartDrag {
+            coordinator?.onClick()
+        }
     }
 }
 
 private struct TerminalLayoutView: View {
+    let windowID: UUID
     let profile: ServerProfile
     let sessionPassword: String?
     let layout: TerminalLayout
     let activePaneID: TerminalPane.ID?
+    let dropErrorMessage: String?
     let confirmReconnect: (Int32) -> Bool
     let actions: TerminalLayoutActions
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Spacer()
+        ZStack(alignment: .top) {
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Spacer()
 
-                Button {
-                    actions.splitPane(activePaneID ?? layout.primary.id, .horizontal)
-                } label: {
-                    Image(systemName: "rectangle.split.2x1")
-                }
-                .buttonStyle(.borderless)
-                .help(layout.splitAxis == .horizontal ? "Close split" : "Split right")
+                    Button {
+                        actions.splitPane(activePaneID ?? layout.primary.id, .horizontal)
+                    } label: {
+                        Image(systemName: "rectangle.split.2x1")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(layout.splitAxis == .horizontal ? "Close split" : "Split right")
 
-                Button {
-                    actions.splitPane(activePaneID ?? layout.primary.id, .vertical)
-                } label: {
-                    Image(systemName: "rectangle.split.1x2")
+                    Button {
+                        actions.splitPane(activePaneID ?? layout.primary.id, .vertical)
+                    } label: {
+                        Image(systemName: "rectangle.split.1x2")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(layout.splitAxis == .vertical ? "Close split" : "Split down")
                 }
-                .buttonStyle(.borderless)
-                .help(layout.splitAxis == .vertical ? "Close split" : "Split down")
+                .padding(.horizontal, 8)
+                .frame(height: 34)
+                .background(Color(nsColor: .controlBackgroundColor))
+
+                Divider()
+
+                if let splitAxis = layout.splitAxis, let secondary = layout.secondary {
+                    switch splitAxis {
+                    case .horizontal:
+                        HSplitView {
+                            paneView(layout.primary)
+                            paneView(secondary)
+                        }
+                    case .vertical:
+                        VSplitView {
+                            paneView(layout.primary)
+                            paneView(secondary)
+                        }
+                    }
+                } else {
+                    paneView(layout.primary)
+                }
             }
-            .padding(.horizontal, 8)
-            .frame(height: 34)
-            .background(Color(nsColor: .controlBackgroundColor))
 
-            Divider()
-
-            if let splitAxis = layout.splitAxis, let secondary = layout.secondary {
-                switch splitAxis {
-                case .horizontal:
-                    HSplitView {
-                        paneView(layout.primary)
-                        paneView(secondary)
-                    }
-                case .vertical:
-                    VSplitView {
-                        paneView(layout.primary)
-                        paneView(secondary)
-                    }
-                }
-            } else {
-                paneView(layout.primary)
+            if let dropErrorMessage {
+                Text(dropErrorMessage)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Color(nsColor: .systemRed), in: RoundedRectangle(cornerRadius: 6))
+                    .padding(.top, 42)
+                    .transition(.opacity)
             }
         }
     }
 
     private func paneView(_ pane: TerminalPane) -> some View {
         TerminalPaneView(
+            windowID: windowID,
             profile: profile,
             sessionPassword: sessionPassword,
             pane: pane,
@@ -573,6 +973,7 @@ private struct TerminalLayoutView: View {
 }
 
 private struct TerminalPaneView: View {
+    let windowID: UUID
     let profile: ServerProfile
     let sessionPassword: String?
     let pane: TerminalPane
@@ -587,10 +988,25 @@ private struct TerminalPaneView: View {
                     HStack(spacing: 2) {
                         ForEach(pane.sessions) { session in
                             HStack(spacing: 6) {
-                                Image(systemName: "terminal")
-                                    .font(.caption)
-                                Text(session.title)
-                                    .lineLimit(1)
+                                HStack(spacing: 6) {
+                                    Image(systemName: "terminal")
+                                        .font(.caption)
+                                    Text(session.title)
+                                        .lineLimit(1)
+                                }
+                                .contentShape(Rectangle())
+                                .overlay(
+                                    TerminalTabDragSource(
+                                        context: TerminalDragContext(
+                                            windowID: windowID,
+                                            paneID: pane.id,
+                                            sessionID: session.id
+                                        ),
+                                        onClick: {
+                                            actions.selectSession(session.id, pane.id)
+                                        }
+                                    )
+                                )
 
                                 Button {
                                     actions.closeSession(session.id, pane.id)
@@ -609,25 +1025,6 @@ private struct TerminalPaneView: View {
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 actions.selectSession(session.id, pane.id)
-                            }
-                            .onDrag {
-                                TerminalTabDragStore.begin(
-                                    TerminalDragContext(
-                                        paneID: pane.id,
-                                        sessionID: session.id
-                                    )
-                                )
-                                let provider = NSItemProvider()
-                                provider.registerDataRepresentation(forTypeIdentifier: UTType.plainText.identifier, visibility: .ownProcess) { completion in
-                                    completion(Data(session.id.uuidString.utf8), nil)
-                                    return nil
-                                }
-                                return provider
-                            } preview: {
-                                Text("I")
-                                    .font(.system(size: 22, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(.primary)
-                                    .frame(width: 10, height: 28)
                             }
                             .onDrop(of: TerminalTabDragStore.acceptedTypes, isTargeted: nil) { _ in
                                 handleDrop(before: session.id)
@@ -665,6 +1062,9 @@ private struct TerminalPaneView: View {
                             isActive: isActivePane && session.id == pane.selectedSessionID,
                             startupCommand: session.startupCommand,
                             onRunningChanged: { _ in },
+                            onNormalExit: {
+                                actions.scheduleNormalExitClose(session.id, pane.id)
+                            },
                             onUnexpectedExit: { status in
                                 DispatchQueue.main.async {
                                     if confirmReconnect(status) {
@@ -679,6 +1079,9 @@ private struct TerminalPaneView: View {
                         .id(session.terminalID)
                         .opacity(session.id == pane.selectedSessionID ? 1 : 0)
                         .allowsHitTesting(session.id == pane.selectedSessionID)
+                        .onDrop(of: [.item], isTargeted: nil) { providers in
+                            handleRemotePathDrop(providers: providers, into: session.runtime)
+                        }
                     }
                 }
             } else {
@@ -709,6 +1112,27 @@ private struct TerminalPaneView: View {
         }
     }
 
+    private func handleRemotePathDrop(providers: [NSItemProvider], into runtime: TerminalSessionRuntime) -> Bool {
+        let hasFileURLProvider = providers.contains { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        guard !hasFileURLProvider,
+              let activeDrag = AppDragRegistry.activeRemoteFilePayload else {
+            return false
+        }
+
+        AppDragRegistry.endRemoteFileDrag(activeDrag.token)
+
+        guard activeDrag.payload.profile.id == profile.id else {
+            actions.showDropError(NSLocalizedString("Cannot drop files from a different server into this terminal.", comment: "terminal remote path cross-server drop error"))
+            return true
+        }
+
+        let text = activeDrag.payload.items
+            .map { SSHCommandBuilder.shellQuotedArgument($0.path) }
+            .joined(separator: " ") + " "
+        runtime.insertText(text)
+        return true
+    }
+
     private func tabBackground(for session: TerminalSession) -> Color {
         session.id == pane.selectedSessionID
             ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.22)
@@ -721,7 +1145,11 @@ private struct TerminalPaneView: View {
         }
 
         TerminalTabDragStore.clear()
-        actions.moveSession(context.sessionID, context.paneID, pane.id, targetSessionID)
+        if context.windowID == windowID {
+            actions.moveSession(context.sessionID, context.paneID, pane.id, targetSessionID)
+        } else {
+            _ = SSHSessionWindowManager.moveTerminalSession(context, to: windowID, targetPaneID: pane.id, before: targetSessionID)
+        }
         return true
     }
 }

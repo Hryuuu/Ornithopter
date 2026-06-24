@@ -15,9 +15,14 @@ final class TerminalSessionRuntime {
     fileprivate var terminalView: LocalProcessTerminalView?
     fileprivate var coordinator: TerminalTextView.Coordinator?
 #endif
+    private var isClosed = false
 
     func terminate() {
 #if canImport(SwiftTerm)
+        guard !isClosed else {
+            return
+        }
+        isClosed = true
         coordinator?.isClosing = true
         terminalView?.terminate()
         terminalView?.removeFromSuperview()
@@ -26,8 +31,40 @@ final class TerminalSessionRuntime {
 #endif
     }
 
+    func closeGracefully() {
+#if canImport(SwiftTerm)
+        guard !isClosed else {
+            return
+        }
+        isClosed = true
+        coordinator?.isClosing = true
+        terminalView?.send(Array("exit\n".utf8))
+
+        let viewToTerminate = terminalView
+        let viewToRemove = terminalView
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            viewToTerminate?.terminate()
+            viewToRemove?.removeFromSuperview()
+        }
+
+        terminalView = nil
+        coordinator = nil
+#endif
+    }
+
     func reset() {
         terminate()
+        isClosed = false
+    }
+
+    func insertText(_ text: String) {
+#if canImport(SwiftTerm)
+        guard let terminalView else {
+            return
+        }
+
+        terminalView.send(Array(text.utf8))
+#endif
     }
 }
 
@@ -40,6 +77,7 @@ struct TerminalTextView: NSViewRepresentable {
     let isActive: Bool
     let startupCommand: String?
     let onRunningChanged: (Bool) -> Void
+    let onNormalExit: () -> Void
     let onUnexpectedExit: (Int32) -> Void
     let onTitleChanged: (String) -> Void
 
@@ -67,6 +105,7 @@ struct TerminalTextView: NSViewRepresentable {
             sessionPassword: sessionPassword,
             startupCommand: startupCommand,
             onRunningChanged: onRunningChanged,
+            onNormalExit: onNormalExit,
             onUnexpectedExit: onUnexpectedExit,
             onTitleChanged: onTitleChanged
         )
@@ -88,6 +127,7 @@ struct TerminalTextView: NSViewRepresentable {
         coordinator.sessionPassword = sessionPassword
         coordinator.startupCommand = startupCommand
         coordinator.onRunningChanged = onRunningChanged
+        coordinator.onNormalExit = onNormalExit
         coordinator.onUnexpectedExit = onUnexpectedExit
         coordinator.onTitleChanged = onTitleChanged
 
@@ -114,6 +154,7 @@ struct TerminalTextView: NSViewRepresentable {
         var sessionPassword: String?
         var startupCommand: String?
         var onRunningChanged: (Bool) -> Void
+        var onNormalExit: () -> Void
         var onUnexpectedExit: (Int32) -> Void
         var onTitleChanged: (String) -> Void
         var didStart = false
@@ -126,6 +167,7 @@ struct TerminalTextView: NSViewRepresentable {
             sessionPassword: String?,
             startupCommand: String?,
             onRunningChanged: @escaping (Bool) -> Void,
+            onNormalExit: @escaping () -> Void,
             onUnexpectedExit: @escaping (Int32) -> Void,
             onTitleChanged: @escaping (String) -> Void
         ) {
@@ -133,6 +175,7 @@ struct TerminalTextView: NSViewRepresentable {
             self.sessionPassword = sessionPassword
             self.startupCommand = startupCommand
             self.onRunningChanged = onRunningChanged
+            self.onNormalExit = onNormalExit
             self.onUnexpectedExit = onUnexpectedExit
             self.onTitleChanged = onTitleChanged
         }
@@ -179,7 +222,9 @@ struct TerminalTextView: NSViewRepresentable {
             }
 
             let status = exitCode ?? -1
-            if status != 0 {
+            if status == 0 {
+                notifyNormalExit()
+            } else {
                 notifyUnexpectedExit(status)
             }
         }
@@ -193,6 +238,12 @@ struct TerminalTextView: NSViewRepresentable {
         private func notifyUnexpectedExit(_ status: Int32) {
             DispatchQueue.main.async { [weak self] in
                 self?.onUnexpectedExit(status)
+            }
+        }
+
+        private func notifyNormalExit() {
+            DispatchQueue.main.async { [weak self] in
+                self?.onNormalExit()
             }
         }
 
@@ -294,6 +345,7 @@ struct TerminalTextView: View {
     let isActive: Bool
     let startupCommand: String?
     let onRunningChanged: (Bool) -> Void
+    let onNormalExit: () -> Void
     let onUnexpectedExit: (Int32) -> Void
     let onTitleChanged: (String) -> Void
 

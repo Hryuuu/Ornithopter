@@ -12,6 +12,7 @@ struct ServerProfile: Identifiable, Codable, Equatable {
     var username: String
     var port: Int
     var identityFile: String
+    var customIdentityFileEnabled: Bool
     var remotePath: String
     var passwordAuthentication: Bool
     var savePasswordInKeychain: Bool
@@ -30,6 +31,7 @@ struct ServerProfile: Identifiable, Codable, Equatable {
         username: String,
         port: Int = 22,
         identityFile: String = "",
+        customIdentityFileEnabled: Bool? = nil,
         remotePath: String = "~",
         passwordAuthentication: Bool = false,
         savePasswordInKeychain: Bool = false,
@@ -47,6 +49,7 @@ struct ServerProfile: Identifiable, Codable, Equatable {
         self.username = username
         self.port = port
         self.identityFile = identityFile
+        self.customIdentityFileEnabled = customIdentityFileEnabled ?? !identityFile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         self.remotePath = remotePath
         self.passwordAuthentication = passwordAuthentication
         self.savePasswordInKeychain = savePasswordInKeychain
@@ -66,6 +69,7 @@ struct ServerProfile: Identifiable, Codable, Equatable {
         case username
         case port
         case identityFile
+        case customIdentityFileEnabled
         case remotePath
         case passwordAuthentication
         case savePasswordInKeychain
@@ -86,6 +90,8 @@ struct ServerProfile: Identifiable, Codable, Equatable {
         username = try container.decode(String.self, forKey: .username)
         port = try container.decode(Int.self, forKey: .port)
         identityFile = try container.decodeIfPresent(String.self, forKey: .identityFile) ?? ""
+        customIdentityFileEnabled = try container.decodeIfPresent(Bool.self, forKey: .customIdentityFileEnabled)
+            ?? !identityFile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         remotePath = try container.decodeIfPresent(String.self, forKey: .remotePath) ?? "~"
         passwordAuthentication = try container.decodeIfPresent(Bool.self, forKey: .passwordAuthentication) ?? false
         savePasswordInKeychain = try container.decodeIfPresent(Bool.self, forKey: .savePasswordInKeychain) ?? false

@@ -79,6 +79,7 @@ enum AppPreferenceDefaults {
     static let textEditor = "vi"
     static let customTextEditor = ""
     static let defaultIdentityFile = ""
+    static let autoCloseTerminalTabOnNormalExit = true
     static let supportedTextFilePatterns = [
         "*.txt",
         "*.md",
@@ -168,6 +169,7 @@ private struct OrnithopterSettingsView: View {
     @AppStorage("defaultTextEditor") private var defaultTextEditor = AppPreferenceDefaults.textEditor
     @AppStorage("customTextEditor") private var customTextEditor = AppPreferenceDefaults.customTextEditor
     @AppStorage("defaultIdentityFile") private var defaultIdentityFile = AppPreferenceDefaults.defaultIdentityFile
+    @AppStorage("autoCloseTerminalTabOnNormalExit") private var autoCloseTerminalTabOnNormalExit = AppPreferenceDefaults.autoCloseTerminalTabOnNormalExit
     @AppStorage("supportedTextFilePatterns") private var supportedTextFilePatterns = AppPreferenceDefaults.supportedTextFilePatterns
 
     var body: some View {
@@ -223,6 +225,16 @@ private struct OrnithopterSettingsView: View {
             }
 
             GroupBox {
+                SettingsSwitchRow(
+                    title: "Close terminal tabs after normal exit",
+                    isOn: $autoCloseTerminalTabOnNormalExit
+                )
+                    .padding(4)
+            } label: {
+                Label("Terminal", systemImage: "terminal")
+            }
+
+            GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
                     TextEditor(text: $supportedTextFilePatterns)
                         .font(.system(.body, design: .monospaced))
@@ -260,6 +272,26 @@ private struct OrnithopterSettingsView: View {
         defaultTextEditor = AppPreferenceDefaults.textEditor
         customTextEditor = AppPreferenceDefaults.customTextEditor
         defaultIdentityFile = AppPreferenceDefaults.defaultIdentityFile
+        autoCloseTerminalTabOnNormalExit = AppPreferenceDefaults.autoCloseTerminalTabOnNormalExit
         supportedTextFilePatterns = AppPreferenceDefaults.supportedTextFilePatterns
+    }
+}
+
+private struct SettingsSwitchRow: View {
+    let title: LocalizedStringKey
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(title)
+
+            Spacer()
+
+            Toggle("", isOn: $isOn)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+        }
+        .frame(minHeight: 24)
     }
 }

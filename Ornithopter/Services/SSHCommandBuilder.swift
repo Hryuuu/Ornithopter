@@ -25,7 +25,16 @@ enum SSHCommandBuilder {
     }
 
     nonisolated static func shellQuotedArgument(_ value: String) -> String {
-        shellQuote(value)
+        if value == "~" {
+            return "~"
+        }
+
+        if value.hasPrefix("~/") {
+            let remainder = String(value.dropFirst(2))
+            return remainder.isEmpty ? "~" : "~/\(shellQuote(remainder))"
+        }
+
+        return shellQuote(value)
     }
 
     nonisolated static func folderListArguments(for profile: ServerProfile, path: String) -> [String] {
@@ -124,6 +133,10 @@ enum SSHCommandBuilder {
     }
 
     private nonisolated static func resolvedIdentityFile(for profile: ServerProfile) -> String? {
+        guard !profile.passwordAuthentication, profile.customIdentityFileEnabled else {
+            return nil
+        }
+
         let value = profile.identityFile.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else {
             return nil

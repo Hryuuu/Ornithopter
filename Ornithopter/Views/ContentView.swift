@@ -80,13 +80,13 @@ struct ContentView: View {
                 EmptySelectionView(addAction: addProfile)
             }
         }
-        .frame(minWidth: 800, minHeight: 500)
+        .frame(minWidth: 760, minHeight: 460)
         .background(
             WindowSizeConfigurator(
-                initialWidth: 820,
-                initialHeight: 790,
-                minimumWidth: 800,
-                minimumHeight: 500
+                initialWidth: 780,
+                initialHeight: 700,
+                minimumWidth: 760,
+                minimumHeight: 460
             )
         )
         .toolbar {
@@ -248,6 +248,7 @@ private struct ServerDetailView: View {
     let connectAction: (ServerProfile) -> Void
     let deleteAction: () -> Void
     @State private var hasStoredKeychainPassword = false
+    @State private var authenticationUsesPassword = true
 
     private var canConnect: Bool {
         !profile.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
@@ -264,6 +265,13 @@ private struct ServerDetailView: View {
         Binding(
             get: { !profile.disableExplorer },
             set: { profile.disableExplorer = !$0 }
+        )
+    }
+
+    private var usesCustomIdentityFile: Binding<Bool> {
+        Binding(
+            get: { profile.customIdentityFileEnabled },
+            set: { profile.customIdentityFileEnabled = $0 }
         )
     }
 
@@ -284,8 +292,6 @@ private struct ServerDetailView: View {
                                     .frame(width: 96)
                             }
                         }
-
-                        TextField("SSH key file (optional)", text: $profile.identityFile)
                     }
                     .textFieldStyle(.roundedBorder)
                     .padding(4)
@@ -295,31 +301,52 @@ private struct ServerDetailView: View {
 
                 GroupBox {
                     VStack(alignment: .leading, spacing: 10) {
-                        SettingsToggleRow(isOn: $profile.passwordAuthentication, title: "Password authentication", systemImage: "key")
-
-                        HStack(alignment: .center, spacing: 10) {
-                            SettingsToggleRow(isOn: $profile.savePasswordInKeychain, title: "Save password in Keychain", systemImage: "lock")
-                                .disabled(!profile.passwordAuthentication)
-                                .opacity(profile.passwordAuthentication ? 1 : 0.55)
+                        HStack(alignment: .center, spacing: 12) {
+                            Label("Authentication", systemImage: "lock.shield")
 
                             Spacer()
 
-                            Button {
-                                if SSHPasswordPrompter.updateKeychainPassword(for: profile) {
-                                    hasStoredKeychainPassword = true
-                                }
-                            } label: {
-                                Label(
-                                    hasStoredKeychainPassword ? "Update Keychain Password..." : "Set Keychain Password...",
-                                    systemImage: "key.fill"
-                                )
+                            Picker("", selection: $authenticationUsesPassword) {
+                                Text("Password").tag(true)
+                                Text("Public key").tag(false)
                             }
-                            .controlSize(.small)
-                            .font(.caption)
-                            .disabled(!canSaveKeychainPassword)
-                            .help(canConnect ? "Save or update the password for this server." : "Enter a host and username first.")
+                            .pickerStyle(.segmented)
+                            .fixedSize()
+                            .labelsHidden()
                         }
-                        .frame(minHeight: 24)
+
+                        if profile.passwordAuthentication {
+                            SettingsToggleRow(isOn: $profile.savePasswordInKeychain, title: "Save password in Keychain", systemImage: "lock")
+
+                            HStack {
+                                Spacer()
+                                Button {
+                                    if SSHPasswordPrompter.updateKeychainPassword(for: profile) {
+                                        hasStoredKeychainPassword = true
+                                    }
+                                } label: {
+                                    Label(
+                                        hasStoredKeychainPassword ? "Update Keychain Password..." : "Set Keychain Password...",
+                                        systemImage: "key.fill"
+                                    )
+                                }
+                                .controlSize(.small)
+                                .font(.caption)
+                                .disabled(!canSaveKeychainPassword)
+                                .help(canConnect ? "Save or update the password for this server." : "Enter a host and username first.")
+                            }
+                        }
+
+                        if !profile.passwordAuthentication {
+                            SettingsToggleRow(isOn: usesCustomIdentityFile, title: "Use custom key file", systemImage: "folder")
+
+                            if usesCustomIdentityFile.wrappedValue {
+                                TextField("Key file path", text: $profile.identityFile)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(.body, design: .monospaced))
+                                    .padding(.leading, 28)
+                            }
+                        }
 
                         SettingsToggleRow(isOn: $profile.x11Forwarding, title: "X11 forwarding", systemImage: "display")
 
@@ -362,14 +389,44 @@ private struct ServerDetailView: View {
                     .tint(.red)
                 }
             }
-            .padding(.horizontal, 28)
-            .padding(.top, 14)
-            .padding(.bottom, 28)
-            .frame(maxWidth: 680, alignment: .leading)
+            .padding(.horizontal, 22)
+            .padding(.top, 10)
+            .padding(.bottom, 22)
+            .frame(maxWidth: 620, alignment: .leading)
         }
-        .onAppear(perform: refreshKeychainState)
-        .onChange(of: profile.id) { _, _ in
+        .onAppear {
+            authenticationUsesPassword = profile.passwordAuthentication
             refreshKeychainState()
+        }
+        .onChange(of: profile.id) { _, _ in
+            authenticationUsesPassword = profile.passwordAuthentication
+            refreshKeychainState()
+        }
+        .onChange(of: profile.passwordAuthentication) { _, value in
+            guard authenticationUsesPassword != value else {
+                if !value, profile.savePasswordInKeychain {
+                    DispatchQueue.main.async {
+                        profile.savePasswordInKeychain = false
+                    }
+                }
+                return
+            }
+
+            authenticationUsesPassword = value
+            if !value, profile.savePasswordInKeychain {
+                DispatchQueue.main.async {
+                    profile.savePasswordInKeychain = false
+                }
+            }
+        }
+        .onChange(of: authenticationUsesPassword) { _, value in
+            guard profile.passwordAuthentication != value else {
+                return
+            }
+
+            DispatchQueue.main.async {
+                profile.passwordAuthentication = value
+            }
         }
     }
 
@@ -404,8 +461,15 @@ private struct SettingsToggleRow: View {
     let systemImage: String
 
     var body: some View {
-        Toggle(isOn: $isOn) {
+        HStack(alignment: .center, spacing: 12) {
             SettingsToggleLabel(title, systemImage: systemImage)
+
+            Spacer()
+
+            Toggle("", isOn: $isOn)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
         }
         .frame(minHeight: 24, alignment: .center)
     }

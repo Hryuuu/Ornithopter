@@ -6,6 +6,13 @@
 "Username" = "사용자 이름";
 "Port" = "포트";
 "SSH key file (optional)" = "SSH 키 파일 (선택 사항)";
+"Use custom SSH key file" = "SSH 키 파일 위치 별도 지정";
+"SSH key file path" = "SSH 키 파일 경로";
+"Use custom key file" = "키 파일 위치 별도 지정";
+"Key file path" = "키 파일 경로";
+"Authentication" = "인증 방식";
+"SSH key" = "SSH 키";
+"Public key" = "공개키";
 "Default" = "기본";
 "Password authentication" = "비밀번호 인증";
 "Save password in Keychain" = "Keychain에 비밀번호 저장";
@@ -42,6 +49,7 @@
 "New server defaults" = "새 서버 기본값";
 "Use comma-separated patterns, such as *.txt, *.md, *.py." = "*.txt, *.md, *.py처럼 쉼표로 구분한 패턴을 사용하세요.";
 "Supported file formats" = "지원 파일 형식";
+"Close terminal tabs after normal exit" = "정상 종료 후 터미널 탭 닫기";
 "Reset Settings" = "설정 초기화";
 
 "Show Files" = "파일 표시";
@@ -57,6 +65,8 @@
 "Add a terminal tab to start a session." = "세션을 시작하려면 터미널 탭을 추가하세요.";
 "New Terminal" = "새 터미널";
 "Terminal" = "터미널";
+"Cannot move terminal tab to a different server." = "터미널 탭을 다른 서버로 이동할 수 없습니다.";
+"Cannot drop files from a different server into this terminal." = "다른 서버의 파일을 이 터미널에 드롭할 수 없습니다.";
 
 "Files" = "파일";
 "Refresh" = "새로고침";
