@@ -296,8 +296,6 @@ private struct ServerDetailView: View {
                     }
                     .textFieldStyle(.roundedBorder)
                     .padding(4)
-                } label: {
-                    Text("Default")
                 }
 
                 GroupBox {
@@ -385,7 +383,7 @@ private struct ServerDetailView: View {
                     .textFieldStyle(.roundedBorder)
                     .padding(4)
                 } label: {
-                    Text("Tags & Notes")
+                    Text("Notes")
                 }
 
                 HStack {

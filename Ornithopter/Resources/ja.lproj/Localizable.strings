@@ -34,7 +34,7 @@
 "Show file browser" = "ファイルブラウザを表示";
 "Options" = "オプション";
 "Notes" = "メモ";
-"Tags & Notes" = "タグとメモ";
+"Tags & Notes" = "メモ";
 "Delete Server" = "サーバを削除";
 "Connect" = "接続";
 "Connect to server" = "サーバに接続";
@@ -67,6 +67,12 @@
 "The session ended unexpectedly with status %d." = "セッションが予期せず終了しました。ステータス: %d";
 "Reconnect" = "再接続";
 "Cancel" = "キャンセル";
+"Close this SSH window?" = "このSSHウィンドウを閉じますか？";
+"Open terminal tabs will receive an exit command and disconnect." = "開いているターミナルタブに exit コマンドを送信して切断します。";
+"Close Window" = "ウィンドウを閉じる";
+"Close this terminal tab?" = "このターミナルタブを閉じますか？";
+"The terminal tab \"%@\" is still running. It will receive an exit command and disconnect." = "ターミナルタブ「%@」はまだ実行中です。exit コマンドを送信して切断します。";
+"Close Tab" = "タブを閉じる";
 "Close split" = "分割を閉じる";
 "Split right" = "右に分割";
 "Split down" = "下に分割";

@@ -34,7 +34,7 @@
 "Show file browser" = "顯示檔案瀏覽器";
 "Options" = "選項";
 "Notes" = "備註";
-"Tags & Notes" = "標籤與備註";
+"Tags & Notes" = "備註";
 "Delete Server" = "刪除伺服器";
 "Connect" = "連線";
 "Connect to server" = "連線到伺服器";
@@ -67,6 +67,12 @@
 "The session ended unexpectedly with status %d." = "工作階段意外結束，狀態為 %d。";
 "Reconnect" = "重新連線";
 "Cancel" = "取消";
+"Close this SSH window?" = "關閉此 SSH 視窗？";
+"Open terminal tabs will receive an exit command and disconnect." = "開啟的終端機分頁會收到 exit 指令並中斷連線。";
+"Close Window" = "關閉視窗";
+"Close this terminal tab?" = "關閉此終端機分頁？";
+"The terminal tab \"%@\" is still running. It will receive an exit command and disconnect." = "終端機分頁「%@」仍在執行。它會收到 exit 指令並中斷連線。";
+"Close Tab" = "關閉分頁";
 "Close split" = "關閉分割";
 "Split right" = "向右分割";
 "Split down" = "向下分割";

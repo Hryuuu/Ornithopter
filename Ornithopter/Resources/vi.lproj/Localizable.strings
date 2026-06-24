@@ -34,7 +34,7 @@
 "Show file browser" = "Hiện trình duyệt tệp";
 "Options" = "Tùy chọn";
 "Notes" = "Ghi chú";
-"Tags & Notes" = "Thẻ và ghi chú";
+"Tags & Notes" = "Ghi chú";
 "Delete Server" = "Xóa máy chủ";
 "Connect" = "Kết nối";
 "Connect to server" = "Kết nối tới máy chủ";
@@ -67,6 +67,12 @@
 "The session ended unexpectedly with status %d." = "Phiên kết thúc bất ngờ với trạng thái %d.";
 "Reconnect" = "Kết nối lại";
 "Cancel" = "Hủy";
+"Close this SSH window?" = "Đóng cửa sổ SSH này?";
+"Open terminal tabs will receive an exit command and disconnect." = "Các tab terminal đang mở sẽ nhận lệnh exit và ngắt kết nối.";
+"Close Window" = "Đóng cửa sổ";
+"Close this terminal tab?" = "Đóng tab terminal này?";
+"The terminal tab \"%@\" is still running. It will receive an exit command and disconnect." = "Tab terminal \"%@\" vẫn đang chạy. Tab này sẽ nhận lệnh exit và ngắt kết nối.";
+"Close Tab" = "Đóng tab";
 "Close split" = "Đóng chia khung";
 "Split right" = "Chia sang phải";
 "Split down" = "Chia xuống dưới";

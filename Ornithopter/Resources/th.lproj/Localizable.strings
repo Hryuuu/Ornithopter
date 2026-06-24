@@ -34,7 +34,7 @@
 "Show file browser" = "แสดงตัวเรียกดูไฟล์";
 "Options" = "ตัวเลือก";
 "Notes" = "บันทึก";
-"Tags & Notes" = "แท็กและบันทึก";
+"Tags & Notes" = "บันทึก";
 "Delete Server" = "ลบเซิร์ฟเวอร์";
 "Connect" = "เชื่อมต่อ";
 "Connect to server" = "เชื่อมต่อกับเซิร์ฟเวอร์";
@@ -67,6 +67,12 @@
 "The session ended unexpectedly with status %d." = "เซสชันสิ้นสุดโดยไม่คาดคิดด้วยสถานะ %d";
 "Reconnect" = "เชื่อมต่อใหม่";
 "Cancel" = "ยกเลิก";
+"Close this SSH window?" = "ปิดหน้าต่าง SSH นี้หรือไม่?";
+"Open terminal tabs will receive an exit command and disconnect." = "แท็บเทอร์มินัลที่เปิดอยู่จะได้รับคำสั่ง exit แล้วตัดการเชื่อมต่อ";
+"Close Window" = "ปิดหน้าต่าง";
+"Close this terminal tab?" = "ปิดแท็บเทอร์มินัลนี้หรือไม่?";
+"The terminal tab \"%@\" is still running. It will receive an exit command and disconnect." = "แท็บเทอร์มินัล \"%@\" ยังทำงานอยู่ จะได้รับคำสั่ง exit แล้วตัดการเชื่อมต่อ";
+"Close Tab" = "ปิดแท็บ";
 "Close split" = "ปิดหน้าต่างแบ่ง";
 "Split right" = "แบ่งไปทางขวา";
 "Split down" = "แบ่งลงด้านล่าง";

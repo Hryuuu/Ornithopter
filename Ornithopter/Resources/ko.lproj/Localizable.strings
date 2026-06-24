@@ -34,7 +34,7 @@
 "Show file browser" = "파일 브라우저 표시";
 "Options" = "옵션";
 "Notes" = "메모";
-"Tags & Notes" = "태그 및 메모";
+"Tags & Notes" = "메모";
 "Delete Server" = "서버 삭제";
 "Connect" = "연결";
 "Connect to server" = "서버에 연결";
@@ -67,6 +67,12 @@
 "The session ended unexpectedly with status %d." = "세션이 예기치 않게 종료되었습니다. 상태: %d";
 "Reconnect" = "다시 연결";
 "Cancel" = "취소";
+"Close this SSH window?" = "이 SSH 창을 닫을까요?";
+"Open terminal tabs will receive an exit command and disconnect." = "열려 있는 터미널 탭에 exit 명령을 보내고 연결을 끊습니다.";
+"Close Window" = "창 닫기";
+"Close this terminal tab?" = "이 터미널 탭을 닫을까요?";
+"The terminal tab \"%@\" is still running. It will receive an exit command and disconnect." = "\"%@\" 터미널 탭이 아직 실행 중입니다. exit 명령을 보내고 연결을 끊습니다.";
+"Close Tab" = "탭 닫기";
 "Close split" = "분할 닫기";
 "Split right" = "오른쪽으로 분할";
 "Split down" = "아래로 분할";

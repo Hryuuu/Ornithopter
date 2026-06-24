@@ -34,7 +34,7 @@
 "Show file browser" = "显示文件浏览器";
 "Options" = "选项";
 "Notes" = "备注";
-"Tags & Notes" = "标签和备注";
+"Tags & Notes" = "备注";
 "Delete Server" = "删除服务器";
 "Connect" = "连接";
 "Connect to server" = "连接到服务器";
@@ -67,6 +67,12 @@
 "The session ended unexpectedly with status %d." = "会话意外结束，状态为 %d。";
 "Reconnect" = "重新连接";
 "Cancel" = "取消";
+"Close this SSH window?" = "关闭此 SSH 窗口？";
+"Open terminal tabs will receive an exit command and disconnect." = "打开的终端标签页将收到 exit 命令并断开连接。";
+"Close Window" = "关闭窗口";
+"Close this terminal tab?" = "关闭此终端标签页？";
+"The terminal tab \"%@\" is still running. It will receive an exit command and disconnect." = "终端标签页“%@”仍在运行。它将收到 exit 命令并断开连接。";
+"Close Tab" = "关闭标签页";
 "Close split" = "关闭分屏";
 "Split right" = "向右分屏";
 "Split down" = "向下分屏";

@@ -34,7 +34,7 @@
 "Show file browser" = "Afficher le navigateur de fichiers";
 "Options" = "Options";
 "Notes" = "Notes";
-"Tags & Notes" = "Tags et notes";
+"Tags & Notes" = "Notes";
 "Delete Server" = "Supprimer le serveur";
 "Connect" = "Connecter";
 "Connect to server" = "Se connecter au serveur";
@@ -67,6 +67,12 @@
 "The session ended unexpectedly with status %d." = "La session s’est terminée de façon inattendue avec l’état %d.";
 "Reconnect" = "Reconnecter";
 "Cancel" = "Annuler";
+"Close this SSH window?" = "Fermer cette fenêtre SSH ?";
+"Open terminal tabs will receive an exit command and disconnect." = "Les onglets de terminal ouverts recevront une commande exit et seront déconnectés.";
+"Close Window" = "Fermer la fenêtre";
+"Close this terminal tab?" = "Fermer cet onglet de terminal ?";
+"The terminal tab \"%@\" is still running. It will receive an exit command and disconnect." = "L’onglet de terminal \"%@\" est toujours en cours d’exécution. Il recevra une commande exit et sera déconnecté.";
+"Close Tab" = "Fermer l’onglet";
 "Close split" = "Fermer la division";
 "Split right" = "Diviser à droite";
 "Split down" = "Diviser vers le bas";
