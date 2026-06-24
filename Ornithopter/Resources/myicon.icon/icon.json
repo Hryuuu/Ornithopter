@@ -28,8 +28,8 @@
           "position" : {
             "scale" : 1.4,
             "translation-in-points" : [
-              -163,
-              -119
+              -158.3673095703125,
+              -140.2484130859375
             ]
           }
         },
@@ -42,7 +42,7 @@
             "scale" : 1.45,
             "translation-in-points" : [
               0,
-              0
+              -24
             ]
           }
         },
@@ -54,7 +54,7 @@
             "scale" : 1.45,
             "translation-in-points" : [
               0,
-              0
+              -24
             ]
           }
         },
@@ -67,7 +67,7 @@
             "scale" : 1.45,
             "translation-in-points" : [
               0,
-              0
+              -24
             ]
           }
         }
