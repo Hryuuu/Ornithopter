@@ -42,7 +42,9 @@ final class TerminalSessionRuntime {
 
         let viewToTerminate = terminalView
         let viewToRemove = terminalView
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+        // Normal window/app closes give the remote shell time to process exit.
+        // Crashes, force quits, and power loss can still leave cleanup to the OS.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             viewToTerminate?.terminate()
             viewToRemove?.removeFromSuperview()
         }

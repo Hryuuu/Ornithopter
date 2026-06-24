@@ -8,7 +8,16 @@ import Foundation
 
 enum SSHCommandBuilder {
     nonisolated static func sshArguments(for profile: ServerProfile, startupCommand: String? = nil) -> [String] {
-        var arguments: [String] = []
+        var arguments: [String] = [
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "ConnectionAttempts=1",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=2"
+        ]
         appendSSHOptions(for: profile, to: &arguments)
         appendX11Options(for: profile, to: &arguments)
 

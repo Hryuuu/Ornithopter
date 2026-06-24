@@ -41,6 +41,51 @@ private struct NameValidation {
     }
 }
 
+private nonisolated struct RemoteSubprocessResult {
+    let outputText: String
+    let errorText: String
+    let terminationStatus: Int32
+}
+
+private nonisolated final class RemoteProcessOutputCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func start(readingFrom fileHandle: FileHandle) {
+        fileHandle.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                return
+            }
+
+            self?.append(chunk)
+        }
+    }
+
+    func stop(readingFrom fileHandle: FileHandle) {
+        fileHandle.readabilityHandler = nil
+    }
+
+    func finish(readingFrom fileHandle: FileHandle) -> String {
+        fileHandle.readabilityHandler = nil
+        append(fileHandle.readDataToEndOfFile())
+
+        lock.lock()
+        defer { lock.unlock() }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func append(_ chunk: Data) {
+        guard !chunk.isEmpty else {
+            return
+        }
+
+        lock.lock()
+        data.append(chunk)
+        lock.unlock()
+    }
+}
+
 @MainActor
 final class RemoteFileStore: ObservableObject {
     @Published private(set) var currentPath: String
@@ -896,85 +941,50 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func loadDirectory(profile: ServerProfile, path: String, password: String?) -> Result<[RemoteFileItem], RemoteFileError> {
-        let process = Process()
-        let input = Pipe()
-        let output = Pipe()
-        let error = Pipe()
+        let result = runSFTPProcess(
+            input: sftpListCommands(for: path),
+            profile: profile,
+            password: password,
+            timeoutMessage: localized("SFTP timed out")
+        )
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
-        process.arguments = SSHCommandBuilder.sftpArguments(for: profile, allowPassword: password != nil)
-        process.environment = sftpEnvironment(password: password)
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = error
-
-        do {
-            try process.run()
-
-            let commands = sftpListCommands(for: path)
-            input.fileHandleForWriting.write(Data(commands.utf8))
-            try? input.fileHandleForWriting.close()
-
-            guard waitForSFTPProcess(process) else {
-                return .failure(RemoteFileError(message: localized("SFTP timed out")))
-            }
-
-            let outputText = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            _ = String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-
-            if process.terminationStatus == 0 {
-                return .success(parseListing(outputText, basePath: path))
+        switch result {
+        case .success(let subprocessResult):
+            if subprocessResult.terminationStatus == 0 {
+                return .success(parseListing(subprocessResult.outputText, basePath: path))
             } else {
                 return loadDirectoryPlain(profile: profile, path: path, password: password)
             }
-        } catch {
-            return .failure(RemoteFileError(message: error.localizedDescription))
+        case .failure(let error):
+            return .failure(error)
         }
     }
 
     private nonisolated static func downloadItem(_ item: RemoteFileItem, to destination: URL, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
-        let process = Process()
-        let input = Pipe()
-        let output = Pipe()
-        let error = Pipe()
+        let command = item.isDirectory
+            ? "get -R \(sftpQuoted(item.path)) \(sftpQuoted(destination.path))"
+            : "get \(sftpQuoted(item.path)) \(sftpQuoted(destination.path))"
+        let commands = """
+        \(command)
+        quit
+        """
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
-        process.arguments = SSHCommandBuilder.sftpArguments(for: profile, allowPassword: password != nil)
-        process.environment = sftpEnvironment(password: password)
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = error
-
-        do {
-            try process.run()
-
-            let command = item.isDirectory
-                ? "get -R \(sftpQuoted(item.path)) \(sftpQuoted(destination.path))"
-                : "get \(sftpQuoted(item.path)) \(sftpQuoted(destination.path))"
-            let commands = """
-            \(command)
-            quit
-            """
-
-            input.fileHandleForWriting.write(Data(commands.utf8))
-            try? input.fileHandleForWriting.close()
-            guard waitForSFTPProcess(process) else {
-                return .failure(RemoteFileError(message: localized("SFTP download timed out")))
-            }
-
-            let errorText = String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            let outputText = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-
-            guard process.terminationStatus == 0 else {
-                let message = [errorText, outputText]
+        switch runSFTPProcess(
+            input: commands,
+            profile: profile,
+            password: password,
+            timeoutMessage: localized("SFTP download timed out")
+        ) {
+        case .success(let result):
+            guard result.terminationStatus == 0 else {
+                let message = [result.errorText, result.outputText]
                     .joined(separator: "\n")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return .failure(RemoteFileError(message: message.isEmpty ? "SFTP download failed" : message))
             }
-
             return .success(())
-        } catch {
-            return .failure(RemoteFileError(message: error.localizedDescription))
+        case .failure(let error):
+            return .failure(error)
         }
     }
 
@@ -1196,72 +1206,108 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func runSFTPCommands(_ commands: String, profile: ServerProfile, password: String?, fallbackMessage: String) -> Result<Void, RemoteFileError> {
-        let process = Process()
-        let input = Pipe()
-        let output = Pipe()
-        let error = Pipe()
+        let result = runSFTPProcess(
+            input: commands + "\nquit\n",
+            profile: profile,
+            password: password,
+            timeoutMessage: localizedFormat("%@: timed out", fallbackMessage)
+        )
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
-        process.arguments = SSHCommandBuilder.sftpArguments(for: profile, allowPassword: password != nil)
-        process.environment = sftpEnvironment(password: password)
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = error
-
-        do {
-            try process.run()
-
-            input.fileHandleForWriting.write(Data((commands + "\nquit\n").utf8))
-            try? input.fileHandleForWriting.close()
-            guard waitForSFTPProcess(process) else {
-                return .failure(RemoteFileError(message: localizedFormat("%@: timed out", fallbackMessage)))
-            }
-
-            let errorText = String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            let outputText = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-
-            guard process.terminationStatus == 0 else {
-                let message = [errorText, outputText]
+        switch result {
+        case .success(let subprocessResult):
+            guard subprocessResult.terminationStatus == 0 else {
+                let message = [subprocessResult.errorText, subprocessResult.outputText]
                     .joined(separator: "\n")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return .failure(RemoteFileError(message: message.isEmpty ? fallbackMessage : message))
             }
-
             return .success(())
-        } catch {
-            return .failure(RemoteFileError(message: error.localizedDescription))
+        case .failure(let error):
+            return .failure(error)
         }
     }
 
     private nonisolated static func runRemoteCommand(_ command: String, profile: ServerProfile, password: String?, fallbackMessage: String) -> Result<Void, RemoteFileError> {
-        let process = Process()
-        let output = Pipe()
-        let error = Pipe()
+        let result = runProcess(
+            executablePath: "/usr/bin/ssh",
+            arguments: SSHCommandBuilder.remoteCommandArguments(for: profile, command: command, allowPassword: password != nil),
+            environment: sftpEnvironment(password: password),
+            input: nil,
+            timeoutMessage: localizedFormat("%@: timed out", fallbackMessage)
+        )
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = SSHCommandBuilder.remoteCommandArguments(for: profile, command: command, allowPassword: password != nil)
-        process.environment = sftpEnvironment(password: password)
-        process.standardOutput = output
-        process.standardError = error
-
-        do {
-            try process.run()
-            guard waitForSFTPProcess(process) else {
-                return .failure(RemoteFileError(message: localizedFormat("%@: timed out", fallbackMessage)))
-            }
-
-            let errorText = String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            let outputText = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-
-            guard process.terminationStatus == 0 else {
-                let message = [errorText, outputText]
+        switch result {
+        case .success(let subprocessResult):
+            guard subprocessResult.terminationStatus == 0 else {
+                let message = [subprocessResult.errorText, subprocessResult.outputText]
                     .joined(separator: "\n")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return .failure(RemoteFileError(message: message.isEmpty ? fallbackMessage : message))
             }
-
             return .success(())
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
+    private nonisolated static func runSFTPProcess(input: String, profile: ServerProfile, password: String?, timeoutMessage: String) -> Result<RemoteSubprocessResult, RemoteFileError> {
+        runProcess(
+            executablePath: "/usr/bin/sftp",
+            arguments: SSHCommandBuilder.sftpArguments(for: profile, allowPassword: password != nil),
+            environment: sftpEnvironment(password: password),
+            input: input,
+            timeoutMessage: timeoutMessage
+        )
+    }
+
+    private nonisolated static func runProcess(
+        executablePath: String,
+        arguments: [String],
+        environment: [String: String],
+        input: String?,
+        timeoutMessage: String
+    ) -> Result<RemoteSubprocessResult, RemoteFileError> {
+        let process = Process()
+        let inputPipe = input.map { _ in Pipe() }
+        let output = Pipe()
+        let errorPipe = Pipe()
+        let outputCollector = RemoteProcessOutputCollector()
+        let errorCollector = RemoteProcessOutputCollector()
+
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.environment = environment
+        process.standardInput = inputPipe
+        process.standardOutput = output
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+            outputCollector.start(readingFrom: output.fileHandleForReading)
+            errorCollector.start(readingFrom: errorPipe.fileHandleForReading)
+
+            if let input, let inputPipe {
+                inputPipe.fileHandleForWriting.write(Data(input.utf8))
+                try? inputPipe.fileHandleForWriting.close()
+            }
+
+            guard waitForSFTPProcess(process) else {
+                outputCollector.stop(readingFrom: output.fileHandleForReading)
+                errorCollector.stop(readingFrom: errorPipe.fileHandleForReading)
+                return .failure(RemoteFileError(message: timeoutMessage))
+            }
+
+            return .success(
+                RemoteSubprocessResult(
+                    outputText: outputCollector.finish(readingFrom: output.fileHandleForReading),
+                    errorText: errorCollector.finish(readingFrom: errorPipe.fileHandleForReading),
+                    terminationStatus: process.terminationStatus
+                )
+            )
         } catch {
+            outputCollector.stop(readingFrom: output.fileHandleForReading)
+            errorCollector.stop(readingFrom: errorPipe.fileHandleForReading)
+            try? inputPipe?.fileHandleForWriting.close()
             return .failure(RemoteFileError(message: error.localizedDescription))
         }
     }
@@ -1327,6 +1373,9 @@ final class RemoteFileStore: ObservableObject {
         process.terminationHandler = { _ in
             semaphore.signal()
         }
+        guard process.isRunning else {
+            return true
+        }
 
         if semaphore.wait(timeout: .now() + timeout) == .success {
             return true
@@ -1343,37 +1392,23 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func loadDirectoryPlain(profile: ServerProfile, path: String, password: String?) -> Result<[RemoteFileItem], RemoteFileError> {
-        let process = Process()
-        let input = Pipe()
-        let output = Pipe()
-        let error = Pipe()
+        let result = runSFTPProcess(
+            input: sftpListCommands(for: path, decorated: false),
+            profile: profile,
+            password: password,
+            timeoutMessage: localized("SFTP list timed out")
+        )
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
-        process.arguments = SSHCommandBuilder.sftpArguments(for: profile, allowPassword: password != nil)
-        process.environment = sftpEnvironment(password: password)
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = error
-
-        do {
-            try process.run()
-            input.fileHandleForWriting.write(Data(sftpListCommands(for: path, decorated: false).utf8))
-            try? input.fileHandleForWriting.close()
-            guard waitForSFTPProcess(process) else {
-                return .failure(RemoteFileError(message: localized("SFTP list timed out")))
-            }
-
-            let outputText = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            let errorText = String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-
-            guard process.terminationStatus == 0 else {
-                let message = errorText.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch result {
+        case .success(let subprocessResult):
+            guard subprocessResult.terminationStatus == 0 else {
+                let message = subprocessResult.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
                 return .failure(RemoteFileError(message: message.isEmpty ? "SFTP list failed" : message))
             }
 
-            return .success(parseListing(outputText, basePath: path))
-        } catch {
-            return .failure(RemoteFileError(message: error.localizedDescription))
+            return .success(parseListing(subprocessResult.outputText, basePath: path))
+        case .failure(let error):
+            return .failure(error)
         }
     }
 
