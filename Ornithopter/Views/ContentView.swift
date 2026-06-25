@@ -440,6 +440,9 @@ private struct ServerDetailView: View {
         .onChange(of: profile.savePasswordInKeychain) { _, _ in
             refreshKeychainState()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .ornithopterSavedSSHPasswordsDidChange)) { _ in
+            refreshKeychainState()
+        }
     }
 
     private func confirmDelete() {

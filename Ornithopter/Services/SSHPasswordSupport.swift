@@ -7,6 +7,10 @@ import AppKit
 import Foundation
 import Security
 
+extension Notification.Name {
+    static let ornithopterSavedSSHPasswordsDidChange = Notification.Name("Ornithopter.savedSSHPasswordsDidChange")
+}
+
 struct SSHPasswordPromptResult {
     let password: String
     let saveInKeychain: Bool
@@ -64,6 +68,7 @@ enum SSHPasswordKeychain {
 
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecSuccess {
+            notifyPasswordsChanged()
             return
         }
 
@@ -76,7 +81,10 @@ enum SSHPasswordKeychain {
         ]
 
         if status == errSecItemNotFound {
-            SecItemAdd(item as CFDictionary, nil)
+            let addStatus = SecItemAdd(item as CFDictionary, nil)
+            if addStatus == errSecSuccess {
+                notifyPasswordsChanged()
+            }
         }
     }
 
@@ -87,7 +95,28 @@ enum SSHPasswordKeychain {
             kSecAttrAccount as String: profile.id.uuidString
         ]
 
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        if status == errSecSuccess {
+            notifyPasswordsChanged()
+        }
+    }
+
+    @discardableResult
+    static func deleteAllPasswords() -> OSStatus {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service
+        ]
+
+        let status = SecItemDelete(query as CFDictionary)
+        if status == errSecSuccess || status == errSecItemNotFound {
+            notifyPasswordsChanged()
+        }
+        return status
+    }
+
+    private static func notifyPasswordsChanged() {
+        NotificationCenter.default.post(name: .ornithopterSavedSSHPasswordsDidChange, object: nil)
     }
 }
 

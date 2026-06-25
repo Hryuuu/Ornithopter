@@ -178,3 +178,12 @@
 "SFTP download timed out" = "การดาวน์โหลด SFTP หมดเวลา";
 "SFTP list timed out" = "การแสดงรายการ SFTP หมดเวลา";
 "%@: timed out" = "%@: หมดเวลา";
+"Security" = "ความปลอดภัย";
+"Remove every SSH password Ornithopter has stored in macOS Keychain." = "ลบรหัสผ่าน SSH ทั้งหมดที่ Ornithopter บันทึกไว้ในพวงกุญแจ macOS";
+"Remove All Saved Passwords" = "ลบรหัสผ่านที่บันทึกไว้ทั้งหมด";
+"Remove all saved passwords?" = "ลบรหัสผ่านที่บันทึกไว้ทั้งหมดหรือไม่";
+"This removes every SSH password saved by Ornithopter from macOS Keychain. Server profiles and settings will not be deleted." = "การดำเนินการนี้จะลบรหัสผ่าน SSH ทั้งหมดที่ Ornithopter บันทึกไว้จากพวงกุญแจ macOS โปรไฟล์เซิร์ฟเวอร์และการตั้งค่าจะไม่ถูกลบ";
+"Remove Passwords" = "ลบรหัสผ่าน";
+"Could not remove saved passwords." = "ไม่สามารถลบรหัสผ่านที่บันทึกไว้ได้";
+"Keychain returned error code %d." = "พวงกุญแจส่งคืนรหัสข้อผิดพลาด %d";
+"OK" = "ตกลง";

@@ -178,3 +178,12 @@
 "SFTP download timed out" = "Tải xuống SFTP đã hết thời gian chờ";
 "SFTP list timed out" = "Liệt kê SFTP đã hết thời gian chờ";
 "%@: timed out" = "%@: hết thời gian chờ";
+"Security" = "Bảo mật";
+"Remove every SSH password Ornithopter has stored in macOS Keychain." = "Xóa mọi mật khẩu SSH mà Ornithopter đã lưu trong Chuỗi khóa macOS.";
+"Remove All Saved Passwords" = "Xóa tất cả mật khẩu đã lưu";
+"Remove all saved passwords?" = "Xóa tất cả mật khẩu đã lưu?";
+"This removes every SSH password saved by Ornithopter from macOS Keychain. Server profiles and settings will not be deleted." = "Thao tác này xóa mọi mật khẩu SSH do Ornithopter lưu khỏi Chuỗi khóa macOS. Hồ sơ máy chủ và cài đặt sẽ không bị xóa.";
+"Remove Passwords" = "Xóa mật khẩu";
+"Could not remove saved passwords." = "Không thể xóa mật khẩu đã lưu.";
+"Keychain returned error code %d." = "Chuỗi khóa trả về mã lỗi %d.";
+"OK" = "OK";

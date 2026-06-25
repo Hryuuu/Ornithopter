@@ -178,3 +178,12 @@
 "SFTP download timed out" = "La descarga SFTP agotó el tiempo de espera";
 "SFTP list timed out" = "La lista SFTP agotó el tiempo de espera";
 "%@: timed out" = "%@: tiempo de espera agotado";
+"Security" = "Seguridad";
+"Remove every SSH password Ornithopter has stored in macOS Keychain." = "Elimina todas las contraseñas SSH que Ornithopter ha guardado en el llavero de macOS.";
+"Remove All Saved Passwords" = "Eliminar todas las contraseñas guardadas";
+"Remove all saved passwords?" = "¿Eliminar todas las contraseñas guardadas?";
+"This removes every SSH password saved by Ornithopter from macOS Keychain. Server profiles and settings will not be deleted." = "Esto elimina del llavero de macOS todas las contraseñas SSH guardadas por Ornithopter. Los perfiles de servidor y los ajustes no se eliminarán.";
+"Remove Passwords" = "Eliminar contraseñas";
+"Could not remove saved passwords." = "No se pudieron eliminar las contraseñas guardadas.";
+"Keychain returned error code %d." = "El llavero devolvió el código de error %d.";
+"OK" = "Aceptar";

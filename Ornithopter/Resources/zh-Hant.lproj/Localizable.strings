@@ -178,3 +178,12 @@
 "SFTP download timed out" = "SFTP 下載逾時";
 "SFTP list timed out" = "SFTP 列表逾時";
 "%@: timed out" = "%@：逾時";
+"Security" = "安全性";
+"Remove every SSH password Ornithopter has stored in macOS Keychain." = "移除 Ornithopter 儲存在 macOS 鑰匙圈中的所有 SSH 密碼。";
+"Remove All Saved Passwords" = "移除所有已儲存的密碼";
+"Remove all saved passwords?" = "移除所有已儲存的密碼？";
+"This removes every SSH password saved by Ornithopter from macOS Keychain. Server profiles and settings will not be deleted." = "這會從 macOS 鑰匙圈中移除 Ornithopter 儲存的所有 SSH 密碼。伺服器設定檔和設定不會被刪除。";
+"Remove Passwords" = "移除密碼";
+"Could not remove saved passwords." = "無法移除已儲存的密碼。";
+"Keychain returned error code %d." = "鑰匙圈回傳錯誤代碼 %d。";
+"OK" = "確定";

@@ -240,6 +240,29 @@ private struct OrnithopterSettingsView: View {
             }
 
             GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Remove every SSH password Ornithopter has stored in macOS Keychain.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    HStack {
+                        Spacer()
+
+                        Button(role: .destructive) {
+                            removeAllSavedPasswords()
+                        } label: {
+                            Label("Remove All Saved Passwords", systemImage: "trash")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                    }
+                }
+                .padding(4)
+            } label: {
+                Text("Security")
+            }
+
+            GroupBox {
                 SettingsSwitchRow(
                     title: "Close terminal tabs after normal exit",
                     isOn: $autoCloseTerminalTabOnNormalExit
@@ -272,6 +295,37 @@ private struct OrnithopterSettingsView: View {
         defaultIdentityFile = AppPreferenceDefaults.defaultIdentityFile
         autoCloseTerminalTabOnNormalExit = AppPreferenceDefaults.autoCloseTerminalTabOnNormalExit
         supportedTextFilePatterns = AppPreferenceDefaults.supportedTextFilePatterns
+    }
+
+    private func removeAllSavedPasswords() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Remove all saved passwords?", comment: "Remove all saved passwords confirmation title")
+        alert.informativeText = NSLocalizedString(
+            "This removes every SSH password saved by Ornithopter from macOS Keychain. Server profiles and settings will not be deleted.",
+            comment: "Remove all saved passwords confirmation message"
+        )
+        alert.addButton(withTitle: NSLocalizedString("Remove Passwords", comment: "Remove passwords confirmation button"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel button"))
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        let status = SSHPasswordKeychain.deleteAllPasswords()
+        guard status != errSecSuccess && status != errSecItemNotFound else {
+            return
+        }
+
+        let failureAlert = NSAlert()
+        failureAlert.alertStyle = .critical
+        failureAlert.messageText = NSLocalizedString("Could not remove saved passwords.", comment: "Remove all saved passwords failure title")
+        failureAlert.informativeText = String(
+            format: NSLocalizedString("Keychain returned error code %d.", comment: "Remove all saved passwords failure message"),
+            status
+        )
+        failureAlert.addButton(withTitle: NSLocalizedString("OK", comment: "OK button"))
+        failureAlert.runModal()
     }
 }
 
