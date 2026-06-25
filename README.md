@@ -23,6 +23,12 @@ The goal is to make it easy to keep SSH connections in one place, open remote te
 - Server profiles are stored locally on the user's Mac.
 - Passwords are stored in macOS Keychain when the save-password option is enabled.
 
+## License
+
+Ornithopter is released under the MIT License. See [LICENSE](LICENSE).
+
 ## Attribution
+
+Ornithopter uses [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party license notices.
 
 This project was written with Codex and reviewed by the hryu.
