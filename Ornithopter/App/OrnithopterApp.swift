@@ -2,7 +2,6 @@
 //  OrnithopterApp.swift
 //  Ornithopter
 //
-//  Created by 류한서 on 6/18/26.
 //
 
 import AppKit
