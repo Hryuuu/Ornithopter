@@ -4,6 +4,7 @@
 //
 
 import AppKit
+import Darwin
 import SwiftUI
 
 #if canImport(SwiftTerm)
@@ -14,8 +15,39 @@ final class TerminalSessionRuntime {
 #if canImport(SwiftTerm)
     fileprivate var terminalView: LocalProcessTerminalView?
     fileprivate var coordinator: TerminalTextView.Coordinator?
+    fileprivate let processDelegate = TerminalRuntimeProcessDelegate()
 #endif
     private var isClosed = false
+    private var isClosing = false
+    private var didStart = false
+    private var didReceiveTermination = false
+    private var nonRunningPollCount = 0
+    private var terminationPoller: DispatchSourceTimer?
+    private var askPassSession: SSHAskPassSession?
+    private var onRunningChanged: ((Bool) -> Void)?
+    private var onNormalExit: (() -> Void)?
+    private var onUnexpectedExit: ((Int32) -> Void)?
+    private var onTitleChanged: ((String) -> Void)?
+
+    init() {
+    #if canImport(SwiftTerm)
+        processDelegate.runtime = self
+    #endif
+    }
+
+    deinit {
+    #if canImport(SwiftTerm)
+        stopTerminationPoller()
+        stopAskPassSession()
+    #endif
+    }
+
+    func prepareForAttachment() {
+    #if canImport(SwiftTerm)
+        isClosed = false
+        isClosing = false
+    #endif
+    }
 
     func terminate() {
 #if canImport(SwiftTerm)
@@ -23,7 +55,9 @@ final class TerminalSessionRuntime {
             return
         }
         isClosed = true
-        coordinator?.isClosing = true
+        isClosing = true
+        stopTerminationPoller()
+        stopAskPassSession()
         terminalView?.terminate()
         terminalView?.removeFromSuperview()
         terminalView = nil
@@ -37,7 +71,9 @@ final class TerminalSessionRuntime {
             return
         }
         isClosed = true
-        coordinator?.isClosing = true
+        isClosing = true
+        stopTerminationPoller()
+        stopAskPassSession()
         terminalView?.send(Array("exit\n".utf8))
 
         let viewToTerminate = terminalView
@@ -57,6 +93,10 @@ final class TerminalSessionRuntime {
     func reset() {
         terminate()
         isClosed = false
+        isClosing = false
+        didStart = false
+        didReceiveTermination = false
+        nonRunningPollCount = 0
     }
 
     func insertText(_ text: String) {
@@ -68,9 +108,184 @@ final class TerminalSessionRuntime {
         terminalView.send(Array(text.utf8))
 #endif
     }
+
+#if canImport(SwiftTerm)
+    fileprivate func configureCallbacks(
+        onRunningChanged: @escaping (Bool) -> Void,
+        onNormalExit: @escaping () -> Void,
+        onUnexpectedExit: @escaping (Int32) -> Void,
+        onTitleChanged: @escaping (String) -> Void
+    ) {
+        self.onRunningChanged = onRunningChanged
+        self.onNormalExit = onNormalExit
+        self.onUnexpectedExit = onUnexpectedExit
+        self.onTitleChanged = onTitleChanged
+    }
+
+    fileprivate func startIfNeeded(
+        terminalView: LocalProcessTerminalView,
+        profile: ServerProfile,
+        sessionPassword: String?,
+        startupCommand: String?
+    ) {
+        self.terminalView = terminalView
+
+        guard !didStart else {
+            return
+        }
+
+        didStart = true
+        didReceiveTermination = false
+        nonRunningPollCount = 0
+        notifyRunningChanged(true)
+        askPassSession = SSHAskPassSession(password: sessionPassword)
+
+        terminalView.startProcess(
+            executable: "/usr/bin/ssh",
+            args: SSHCommandBuilder.sshArguments(for: profile, startupCommand: startupCommand),
+            environment: terminalEnvironment(),
+            execName: "ssh"
+        )
+        startTerminationPoller()
+    }
+
+    fileprivate func setTerminalTitle(_ title: String) {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else {
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.onTitleChanged?(String(cleanTitle.prefix(40)))
+        }
+    }
+
+    fileprivate func processTerminated(exitCode: Int32?) {
+        guard !didReceiveTermination else {
+            return
+        }
+
+        didReceiveTermination = true
+        stopTerminationPoller()
+        stopAskPassSession()
+        notifyRunningChanged(false)
+
+        guard !isClosing else {
+            return
+        }
+
+        let status = exitCode ?? -1
+        if status == 0 {
+            notifyNormalExit()
+        } else {
+            notifyUnexpectedExit(status)
+        }
+    }
+
+    private func notifyRunningChanged(_ running: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onRunningChanged?(running)
+        }
+    }
+
+    private func notifyUnexpectedExit(_ status: Int32) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onUnexpectedExit?(status)
+        }
+    }
+
+    private func notifyNormalExit() {
+        DispatchQueue.main.async { [weak self] in
+            self?.onNormalExit?()
+        }
+    }
+
+    private func terminalEnvironment() -> [String] {
+        SSHProcessEnvironment.baseEnvironment()
+            .merging(askPassSession?.environment ?? [:]) { _, new in new }
+            .map { "\($0.key)=\($0.value)" }
+    }
+
+    fileprivate func stopAskPassSession() {
+        askPassSession?.stop()
+        askPassSession = nil
+    }
+
+    private func startTerminationPoller() {
+        stopTerminationPoller()
+
+        let poller = DispatchSource.makeTimerSource(queue: .main)
+        poller.schedule(deadline: .now() + 0.5, repeating: .milliseconds(500))
+        poller.setEventHandler { [weak self] in
+            self?.pollForMissedTermination()
+        }
+        terminationPoller = poller
+        poller.resume()
+    }
+
+    private func stopTerminationPoller() {
+        terminationPoller?.cancel()
+        terminationPoller = nil
+        nonRunningPollCount = 0
+    }
+
+    private func pollForMissedTermination() {
+        guard didStart, !isClosed, !didReceiveTermination, let process = terminalView?.process else {
+            stopTerminationPoller()
+            return
+        }
+
+        guard !process.running else {
+            nonRunningPollCount = 0
+            return
+        }
+
+        nonRunningPollCount += 1
+        if let status = reapExitStatusIfAvailable(pid: process.shellPid) {
+            processTerminated(exitCode: status)
+        } else if nonRunningPollCount >= 4 {
+            processTerminated(exitCode: 0)
+        }
+    }
+
+    private func reapExitStatusIfAvailable(pid: pid_t) -> Int32? {
+        guard pid > 0 else {
+            return nil
+        }
+
+        var status: Int32 = 0
+        let result = waitpid(pid, &status, WNOHANG)
+        guard result == pid else {
+            return nil
+        }
+
+        let signal = status & 0x7f
+        if signal == 0 {
+            return (status >> 8) & 0xff
+        }
+
+        return 128 + signal
+    }
+#endif
 }
 
 #if canImport(SwiftTerm)
+
+private final class TerminalRuntimeProcessDelegate: NSObject, LocalProcessTerminalViewDelegate {
+    weak var runtime: TerminalSessionRuntime?
+
+    func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
+
+    func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
+        runtime?.setTerminalTitle(title)
+    }
+
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+
+    func processTerminated(source: TerminalView, exitCode: Int32?) {
+        runtime?.processTerminated(exitCode: exitCode)
+    }
+}
 
 final class OrnithopterTerminalView: LocalProcessTerminalView {
     private var isComposingMarkedText = false
@@ -162,17 +377,18 @@ struct TerminalTextView: NSViewRepresentable {
         Coordinator(
             profile: profile,
             sessionPassword: sessionPassword,
-            startupCommand: startupCommand,
-            onRunningChanged: onRunningChanged,
-            onNormalExit: onNormalExit,
-            onUnexpectedExit: onUnexpectedExit,
-            onTitleChanged: onTitleChanged
+            startupCommand: startupCommand
         )
     }
 
     @discardableResult
     private func attachTerminal(context: Context) -> LocalProcessTerminalView {
-        let terminalView = runtime.terminalView ?? makeTerminalView(coordinator: runtime.coordinator ?? context.coordinator)
+        let existingTerminalView = runtime.terminalView
+        if existingTerminalView != nil {
+            runtime.prepareForAttachment()
+        }
+
+        let terminalView = existingTerminalView ?? makeTerminalView()
         terminalView.removeFromSuperview()
         runtime.terminalView = terminalView
         updateTerminal(terminalView, context: context)
@@ -180,25 +396,27 @@ struct TerminalTextView: NSViewRepresentable {
     }
 
     private func updateTerminal(_ terminalView: LocalProcessTerminalView, context: Context) {
-        let coordinator = runtime.coordinator ?? context.coordinator
+        let coordinator = context.coordinator
         runtime.coordinator = coordinator
         coordinator.profile = profile
         coordinator.sessionPassword = sessionPassword
         coordinator.startupCommand = startupCommand
-        coordinator.onRunningChanged = onRunningChanged
-        coordinator.onNormalExit = onNormalExit
-        coordinator.onUnexpectedExit = onUnexpectedExit
-        coordinator.onTitleChanged = onTitleChanged
 
         runtime.terminalView = terminalView
-        terminalView.processDelegate = coordinator
+        runtime.configureCallbacks(
+            onRunningChanged: onRunningChanged,
+            onNormalExit: onNormalExit,
+            onUnexpectedExit: onUnexpectedExit,
+            onTitleChanged: onTitleChanged
+        )
+        terminalView.processDelegate = runtime.processDelegate
         terminalView.needsDisplay = true
-        coordinator.startIfNeeded(terminalView)
+        coordinator.startIfNeeded(terminalView, runtime: runtime)
     }
 
-    private func makeTerminalView(coordinator: Coordinator) -> LocalProcessTerminalView {
+    private func makeTerminalView() -> LocalProcessTerminalView {
         let terminalView = OrnithopterTerminalView(frame: .zero)
-        terminalView.processDelegate = coordinator
+        terminalView.processDelegate = runtime.processDelegate
         terminalView.nativeBackgroundColor = NSColor(calibratedWhite: 0.03, alpha: 1)
         terminalView.nativeForegroundColor = NSColor(calibratedWhite: 0.88, alpha: 1)
         terminalView.caretColor = NSColor(calibratedRed: 0.65, green: 0.95, blue: 0.62, alpha: 1)
@@ -208,113 +426,32 @@ struct TerminalTextView: NSViewRepresentable {
         return terminalView
     }
 
-    final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
+    final class Coordinator: NSObject {
         var profile: ServerProfile
         var sessionPassword: String?
         var startupCommand: String?
-        var onRunningChanged: (Bool) -> Void
-        var onNormalExit: () -> Void
-        var onUnexpectedExit: (Int32) -> Void
-        var onTitleChanged: (String) -> Void
-        var didStart = false
-        var isClosing = false
         private weak var terminalView: LocalProcessTerminalView?
         private var keyMonitor: Any?
 
         init(
             profile: ServerProfile,
             sessionPassword: String?,
-            startupCommand: String?,
-            onRunningChanged: @escaping (Bool) -> Void,
-            onNormalExit: @escaping () -> Void,
-            onUnexpectedExit: @escaping (Int32) -> Void,
-            onTitleChanged: @escaping (String) -> Void
+            startupCommand: String?
         ) {
             self.profile = profile
             self.sessionPassword = sessionPassword
             self.startupCommand = startupCommand
-            self.onRunningChanged = onRunningChanged
-            self.onNormalExit = onNormalExit
-            self.onUnexpectedExit = onUnexpectedExit
-            self.onTitleChanged = onTitleChanged
         }
 
-        func startIfNeeded(_ terminalView: LocalProcessTerminalView) {
+        func startIfNeeded(_ terminalView: LocalProcessTerminalView, runtime: TerminalSessionRuntime) {
             self.terminalView = terminalView
             installKeyMonitorIfNeeded()
-
-            guard !didStart else {
-                return
-            }
-
-            didStart = true
-            notifyRunningChanged(true)
-
-            terminalView.startProcess(
-                executable: "/usr/bin/ssh",
-                args: SSHCommandBuilder.sshArguments(for: profile, startupCommand: startupCommand),
-                environment: terminalEnvironment(),
-                execName: "ssh"
+            runtime.startIfNeeded(
+                terminalView: terminalView,
+                profile: profile,
+                sessionPassword: sessionPassword,
+                startupCommand: startupCommand
             )
-        }
-
-        func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
-
-        func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
-            let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !cleanTitle.isEmpty else {
-                return
-            }
-
-            DispatchQueue.main.async { [weak self] in
-                self?.onTitleChanged(String(cleanTitle.prefix(40)))
-            }
-        }
-
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-
-        func processTerminated(source: TerminalView, exitCode: Int32?) {
-            notifyRunningChanged(false)
-
-            guard !isClosing else {
-                return
-            }
-
-            let status = exitCode ?? -1
-            if status == 0 {
-                notifyNormalExit()
-            } else {
-                notifyUnexpectedExit(status)
-            }
-        }
-
-        private func notifyRunningChanged(_ running: Bool) {
-            DispatchQueue.main.async { [weak self] in
-                self?.onRunningChanged(running)
-            }
-        }
-
-        private func notifyUnexpectedExit(_ status: Int32) {
-            DispatchQueue.main.async { [weak self] in
-                self?.onUnexpectedExit(status)
-            }
-        }
-
-        private func notifyNormalExit() {
-            DispatchQueue.main.async { [weak self] in
-                self?.onNormalExit()
-            }
-        }
-
-        private func terminalEnvironment() -> [String] {
-            ProcessInfo.processInfo.environment
-                .merging([
-                    "TERM": "xterm-256color",
-                    "LANG": "en_US.UTF-8",
-                    "LC_CTYPE": "en_US.UTF-8"
-                ]) { _, new in new }
-                .merging(SSHAskPass.environment(password: sessionPassword)) { _, new in new }
-                .map { "\($0.key)=\($0.value)" }
         }
 
         private func installKeyMonitorIfNeeded() {

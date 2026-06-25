@@ -36,7 +36,7 @@ final class ProfileStore: ObservableObject {
             username: "",
             identityFile: defaultIdentityFile,
             passwordAuthentication: true,
-            savePasswordInKeychain: true,
+            savePasswordInKeychain: false,
             x11Forwarding: false
         )
         profiles.insert(profile, at: 0)

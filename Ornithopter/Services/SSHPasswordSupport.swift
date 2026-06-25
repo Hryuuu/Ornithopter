@@ -4,6 +4,7 @@
 //
 
 import AppKit
+import Darwin
 import Foundation
 import Security
 
@@ -23,6 +24,7 @@ struct SSHConnectionPasswordResult {
 
 enum SSHPasswordKeychain {
     private static let service = "kucc.co.kr.Ornithopter.ssh-password"
+    private static let accessible = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
 
     static func hasPassword(for profile: ServerProfile) -> Bool {
         let query: [String: Any] = [
@@ -32,7 +34,12 @@ enum SSHPasswordKeychain {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
 
-        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        if status == errSecSuccess {
+            migratePasswordAttributesIfNeeded(for: profile)
+            return true
+        }
+        return false
     }
 
     static func password(for profile: ServerProfile) -> String? {
@@ -51,10 +58,12 @@ enum SSHPasswordKeychain {
             return nil
         }
 
+        migratePasswordAttributesIfNeeded(for: profile)
         return String(data: data, encoding: .utf8)
     }
 
-    static func save(_ password: String, for profile: ServerProfile) {
+    @discardableResult
+    static func save(_ password: String, for profile: ServerProfile) -> OSStatus {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -63,13 +72,14 @@ enum SSHPasswordKeychain {
 
         let attributes: [String: Any] = [
             kSecAttrLabel as String: "Ornithopter \(profile.displayName)",
+            kSecAttrAccessible as String: accessible,
             kSecValueData as String: Data(password.utf8)
         ]
 
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecSuccess {
             notifyPasswordsChanged()
-            return
+            return status
         }
 
         let item: [String: Any] = [
@@ -77,6 +87,7 @@ enum SSHPasswordKeychain {
             kSecAttrService as String: service,
             kSecAttrAccount as String: profile.id.uuidString,
             kSecAttrLabel as String: "Ornithopter \(profile.displayName)",
+            kSecAttrAccessible as String: accessible,
             kSecValueData as String: Data(password.utf8)
         ]
 
@@ -85,7 +96,10 @@ enum SSHPasswordKeychain {
             if addStatus == errSecSuccess {
                 notifyPasswordsChanged()
             }
+            return addStatus
         }
+
+        return status
     }
 
     static func deletePassword(for profile: ServerProfile) {
@@ -118,6 +132,19 @@ enum SSHPasswordKeychain {
     private static func notifyPasswordsChanged() {
         NotificationCenter.default.post(name: .ornithopterSavedSSHPasswordsDidChange, object: nil)
     }
+
+    private static func migratePasswordAttributesIfNeeded(for profile: ServerProfile) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: profile.id.uuidString
+        ]
+        let attributes: [String: Any] = [
+            kSecAttrAccessible as String: accessible
+        ]
+
+        SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    }
 }
 
 enum SSHPasswordPrompter {
@@ -142,13 +169,15 @@ enum SSHPasswordPrompter {
             return nil
         }
 
-        if result.saveInKeychain {
-            SSHPasswordKeychain.save(result.password, for: profile)
-        }
+        let saveStatus = result.saveInKeychain
+            ? SSHPasswordKeychain.save(result.password, for: profile)
+            : errSecSuccess
 
         return SSHConnectionPasswordResult(
             password: result.password,
-            shouldEnableKeychainSaving: result.saveInKeychain && !profile.savePasswordInKeychain
+            shouldEnableKeychainSaving: result.saveInKeychain &&
+                saveStatus == errSecSuccess &&
+                !profile.savePasswordInKeychain
         )
     }
 
@@ -172,8 +201,7 @@ enum SSHPasswordPrompter {
             return false
         }
 
-        SSHPasswordKeychain.save(result.password, for: profile)
-        return true
+        return SSHPasswordKeychain.save(result.password, for: profile) == errSecSuccess
     }
 
     static func requestPassword(
@@ -226,43 +254,151 @@ enum SSHPasswordPrompter {
     }
 }
 
-enum SSHAskPass {
-    nonisolated static func environment(password: String?) -> [String: String] {
-        guard let password, !password.isEmpty else {
-            return [:]
-        }
-
-        guard let helperURL = helperURL() else {
-            return [:]
-        }
-
-        return [
-            "SSH_ASKPASS": helperURL.path,
-            "SSH_ASKPASS_REQUIRE": "force",
-            "DISPLAY": ProcessInfo.processInfo.environment["DISPLAY"] ?? "ornithopter:0",
-            "ORNITHOPTER_SSH_PASSWORD": password
+enum SSHProcessEnvironment {
+    nonisolated static func baseEnvironment() -> [String: String] {
+        let allowedKeys = [
+            "PATH",
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "SHELL",
+            "TERM",
+            "LANG",
+            "LC_CTYPE",
+            "TMPDIR",
+            "SSH_AUTH_SOCK",
+            "DISPLAY"
         ]
+        let source = ProcessInfo.processInfo.environment
+        var environment: [String: String] = [:]
+        for key in allowedKeys {
+            if let value = source[key], !value.isEmpty {
+                environment[key] = value
+            }
+        }
+
+        environment["PATH"] = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        environment["TERM"] = "xterm-256color"
+        environment["LANG"] = environment["LANG"] ?? "en_US.UTF-8"
+        environment["LC_CTYPE"] = environment["LC_CTYPE"] ?? "en_US.UTF-8"
+        environment["DISPLAY"] = environment["DISPLAY"] ?? "ornithopter:0"
+        return environment
     }
+}
 
-    private nonisolated static func helperURL() -> URL? {
-        let url = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("ornithopter-ssh-askpass.sh")
+nonisolated final class SSHAskPassSession: @unchecked Sendable {
+    private(set) var environment: [String: String] = [:]
 
-        if FileManager.default.fileExists(atPath: url.path) {
-            return url
+    private let password: String
+    private let directoryURL: URL
+    private let helperURL: URL
+    private let fifoURL: URL
+    private let queue: DispatchQueue
+    private let lock = NSLock()
+    private var stopped = false
+
+    init?(password: String?) {
+        guard let password, !password.isEmpty else {
+            return nil
+        }
+
+        self.password = password
+        directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ornithopter-askpass-\(UUID().uuidString)", isDirectory: true)
+        helperURL = directoryURL.appendingPathComponent("askpass.sh")
+        fifoURL = directoryURL.appendingPathComponent("password.fifo")
+        queue = DispatchQueue(label: "kr.co.kucc.Ornithopter.askpass.\(UUID().uuidString)")
+
+        do {
+            try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: false)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directoryURL.path)
+        } catch {
+            return nil
+        }
+
+        guard mkfifo(fifoURL.path, 0o600) == 0 else {
+            cleanup()
+            return nil
         }
 
         let script = """
         #!/bin/sh
-        printf '%s\\n' "$ORNITHOPTER_SSH_PASSWORD"
+        /bin/cat "$ORNITHOPTER_ASKPASS_FIFO"
         """
 
         do {
-            try script.write(to: url, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
-            return url
+            try script.write(to: helperURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperURL.path)
         } catch {
+            cleanup()
             return nil
         }
+
+        environment = [
+            "SSH_ASKPASS": helperURL.path,
+            "SSH_ASKPASS_REQUIRE": "force",
+            "ORNITHOPTER_ASKPASS_FIFO": fifoURL.path
+        ]
+        startWriter()
+    }
+
+    deinit {
+        stop()
+    }
+
+    func stop() {
+        lock.lock()
+        let wasStopped = stopped
+        stopped = true
+        lock.unlock()
+
+        guard !wasStopped else {
+            return
+        }
+        cleanup()
+    }
+
+    private func startWriter() {
+        let fifoPath = fifoURL.path
+        let output = Array((password + "\n").utf8)
+
+        queue.async { [weak self] in
+            while self?.isStopped == false {
+                let fd = open(fifoPath, O_WRONLY | O_NONBLOCK)
+                if fd < 0 {
+                    if errno == ENXIO || errno == EINTR {
+                        usleep(50_000)
+                        continue
+                    }
+                    break
+                }
+
+                output.withUnsafeBufferPointer { buffer in
+                    guard let baseAddress = buffer.baseAddress else {
+                        return
+                    }
+
+                    var written = 0
+                    while written < buffer.count {
+                        let count = write(fd, baseAddress.advanced(by: written), buffer.count - written)
+                        if count <= 0 {
+                            break
+                        }
+                        written += count
+                    }
+                }
+                close(fd)
+            }
+        }
+    }
+
+    private var isStopped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
+    }
+
+    private func cleanup() {
+        try? FileManager.default.removeItem(at: directoryURL)
     }
 }

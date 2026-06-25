@@ -1228,10 +1228,15 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func runRemoteCommand(_ command: String, profile: ServerProfile, password: String?, fallbackMessage: String) -> Result<Void, RemoteFileError> {
+        let askPassSession = SSHAskPassSession(password: password)
+        defer {
+            askPassSession?.stop()
+        }
+
         let result = runProcess(
             executablePath: "/usr/bin/ssh",
             arguments: SSHCommandBuilder.remoteCommandArguments(for: profile, command: command, allowPassword: password != nil),
-            environment: sftpEnvironment(password: password),
+            environment: remoteProcessEnvironment(askPassSession: askPassSession),
             input: nil,
             timeoutMessage: localizedFormat("%@: timed out", fallbackMessage)
         )
@@ -1251,10 +1256,15 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func runSFTPProcess(input: String, profile: ServerProfile, password: String?, timeoutMessage: String) -> Result<RemoteSubprocessResult, RemoteFileError> {
-        runProcess(
+        let askPassSession = SSHAskPassSession(password: password)
+        defer {
+            askPassSession?.stop()
+        }
+
+        return runProcess(
             executablePath: "/usr/bin/sftp",
             arguments: SSHCommandBuilder.sftpArguments(for: profile, allowPassword: password != nil),
-            environment: sftpEnvironment(password: password),
+            environment: remoteProcessEnvironment(askPassSession: askPassSession),
             input: input,
             timeoutMessage: timeoutMessage
         )
@@ -1359,9 +1369,9 @@ final class RemoteFileStore: ObservableObject {
         return folder.appendingPathComponent("Ornithopter Selection", isDirectory: true)
     }
 
-    private nonisolated static func sftpEnvironment(password: String?) -> [String: String] {
-        ProcessInfo.processInfo.environment
-            .merging(SSHAskPass.environment(password: password)) { _, new in new }
+    private nonisolated static func remoteProcessEnvironment(askPassSession: SSHAskPassSession?) -> [String: String] {
+        SSHProcessEnvironment.baseEnvironment()
+            .merging(askPassSession?.environment ?? [:]) { _, new in new }
     }
 
     private nonisolated static func waitForSFTPProcess(_ process: Process, timeout: TimeInterval = 20) -> Bool {

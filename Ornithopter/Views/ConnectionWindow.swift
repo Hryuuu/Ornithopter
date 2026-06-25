@@ -67,20 +67,27 @@ enum SSHSessionWindowManager {
         window.delegate = windowDelegate
         windowDelegates[windowID] = windowDelegate
 
-        NotificationCenter.default.addObserver(
+        windowDelegate.closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: window,
             queue: .main
-        ) { _ in
-            registrations[windowID]?.closeAllSessions()
-            registrations[windowID] = nil
-            windowsByID[windowID] = nil
-            windowDelegates[windowID] = nil
-            windows.removeAll { $0 === window }
+        ) { [weak window] _ in
+            cleanupWindow(id: windowID, window: window)
         }
 
         window.makeKeyAndOrderFront(nil)
         return true
+    }
+
+    private static func cleanupWindow(id: UUID, window: NSWindow?) {
+        let existingWindow = windowsByID[id]
+        registrations[id]?.closeAllSessions()
+        registrations[id] = nil
+        windowsByID[id] = nil
+        windowDelegates[id] = nil
+        if let window = window ?? existingWindow {
+            windows.removeAll { $0 === window }
+        }
     }
 
     fileprivate static func registerWindow(
@@ -90,7 +97,11 @@ enum SSHSessionWindowManager {
         detachSession: @escaping (TerminalPane.ID, TerminalSession.ID) -> TerminalSession?,
         insertSession: @escaping (TerminalSession, TerminalPane.ID, TerminalSession.ID?) -> Void,
         showDropError: @escaping (String) -> Void,
-        hasOpenSessions: @escaping () -> Bool,
+        updateSessionRunning: @escaping (TerminalSession.ID, Bool) -> Bool,
+        scheduleNormalExitClose: @escaping (TerminalSession.ID) -> Bool,
+        handleUnexpectedExit: @escaping (TerminalSession.ID, Int32) -> Bool,
+        updateSessionTitle: @escaping (TerminalSession.ID, String) -> Bool,
+        hasRunningSessions: @escaping () -> Bool,
         closeAllSessions: @escaping () -> Void
     ) {
         registrations[id] = TerminalWindowRegistration(
@@ -99,7 +110,11 @@ enum SSHSessionWindowManager {
             detachSession: detachSession,
             insertSession: insertSession,
             showDropError: showDropError,
-            hasOpenSessions: hasOpenSessions,
+            updateSessionRunning: updateSessionRunning,
+            scheduleNormalExitClose: scheduleNormalExitClose,
+            handleUnexpectedExit: handleUnexpectedExit,
+            updateSessionTitle: updateSessionTitle,
+            hasRunningSessions: hasRunningSessions,
             closeAllSessions: closeAllSessions
         )
     }
@@ -149,11 +164,35 @@ enum SSHSessionWindowManager {
     }
 
     fileprivate static func shouldCloseWindow(id: UUID) -> Bool {
-        guard registrations[id]?.hasOpenSessions() == true else {
+        guard registrations[id]?.hasRunningSessions() == true else {
             return true
         }
 
         return confirmCloseWindowWithOpenSessions()
+    }
+
+    fileprivate static func updateTerminalSessionRunning(_ sessionID: TerminalSession.ID, isRunning: Bool) {
+        for registration in registrations.values where registration.updateSessionRunning(sessionID, isRunning) {
+            return
+        }
+    }
+
+    fileprivate static func scheduleNormalExitClose(_ sessionID: TerminalSession.ID) {
+        for registration in registrations.values where registration.scheduleNormalExitClose(sessionID) {
+            return
+        }
+    }
+
+    fileprivate static func handleUnexpectedExit(_ sessionID: TerminalSession.ID, status: Int32) {
+        for registration in registrations.values where registration.handleUnexpectedExit(sessionID, status) {
+            return
+        }
+    }
+
+    fileprivate static func updateTerminalSessionTitle(_ sessionID: TerminalSession.ID, title: String) {
+        for registration in registrations.values where registration.updateSessionTitle(sessionID, title) {
+            return
+        }
     }
 
     private static func confirmCloseWindowWithOpenSessions() -> Bool {
@@ -177,15 +216,26 @@ private struct TerminalWindowRegistration {
     let detachSession: (TerminalPane.ID, TerminalSession.ID) -> TerminalSession?
     let insertSession: (TerminalSession, TerminalPane.ID, TerminalSession.ID?) -> Void
     let showDropError: (String) -> Void
-    let hasOpenSessions: () -> Bool
+    let updateSessionRunning: (TerminalSession.ID, Bool) -> Bool
+    let scheduleNormalExitClose: (TerminalSession.ID) -> Bool
+    let handleUnexpectedExit: (TerminalSession.ID, Int32) -> Bool
+    let updateSessionTitle: (TerminalSession.ID, String) -> Bool
+    let hasRunningSessions: () -> Bool
     let closeAllSessions: () -> Void
 }
 
 private final class TerminalWindowDelegate: NSObject, NSWindowDelegate {
     let windowID: UUID
+    var closeObserver: NSObjectProtocol?
 
     init(windowID: UUID) {
         self.windowID = windowID
+    }
+
+    deinit {
+        if let closeObserver {
+            NotificationCenter.default.removeObserver(closeObserver)
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -285,7 +335,11 @@ struct ConnectionWindowView: View {
                 detachSession: detachSession,
                 insertSession: insertSession,
                 showDropError: showDropError,
-                hasOpenSessions: hasOpenSessions,
+                updateSessionRunning: updateSessionRunning,
+                scheduleNormalExitClose: scheduleNormalExitClose,
+                handleUnexpectedExit: handleUnexpectedExit,
+                updateSessionTitle: updateSessionTitle,
+                hasRunningSessions: hasRunningSessions,
                 closeAllSessions: closeAllSessions
             )
         }
@@ -418,6 +472,16 @@ struct ConnectionWindowView: View {
         activePaneID = terminalLayout.validPaneID(preferred: paneID)
     }
 
+    @discardableResult
+    private func scheduleNormalExitClose(_ sessionID: TerminalSession.ID) -> Bool {
+        guard let paneID = terminalLayout.paneID(containing: sessionID) else {
+            return false
+        }
+
+        scheduleNormalExitClose(sessionID, in: paneID)
+        return true
+    }
+
     private func selectSession(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID) {
         terminalLayout.selectSession(sessionID, in: paneID)
         activePaneID = paneID
@@ -455,13 +519,46 @@ struct ConnectionWindowView: View {
         terminalLayout.updateSessionRunning(sessionID, in: paneID, isRunning: isRunning)
     }
 
+    @discardableResult
+    private func updateSessionRunning(_ sessionID: TerminalSession.ID, isRunning: Bool) -> Bool {
+        guard let paneID = terminalLayout.paneID(containing: sessionID) else {
+            return false
+        }
+
+        terminalLayout.updateSessionRunning(sessionID, in: paneID, isRunning: isRunning)
+        return true
+    }
+
     private func reconnectSession(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID) {
         terminalLayout.reconnectSession(sessionID, in: paneID)
         activePaneID = paneID
     }
 
+    @discardableResult
+    private func handleUnexpectedExit(_ sessionID: TerminalSession.ID, status: Int32) -> Bool {
+        guard let paneID = terminalLayout.paneID(containing: sessionID) else {
+            return false
+        }
+
+        if confirmReconnect(status: status) {
+            terminalLayout.reconnectSession(sessionID, in: paneID)
+            activePaneID = paneID
+        }
+        return true
+    }
+
     private func updateSessionTitle(_ sessionID: TerminalSession.ID, in paneID: TerminalPane.ID, title: String) {
         terminalLayout.updateSessionTitle(sessionID, in: paneID, title: displayTitle(from: title))
+    }
+
+    @discardableResult
+    private func updateSessionTitle(_ sessionID: TerminalSession.ID, title: String) -> Bool {
+        guard let paneID = terminalLayout.paneID(containing: sessionID) else {
+            return false
+        }
+
+        terminalLayout.updateSessionTitle(sessionID, in: paneID, title: displayTitle(from: title))
+        return true
     }
 
     private func showDropError(_ message: String) {
@@ -478,8 +575,8 @@ struct ConnectionWindowView: View {
         terminalLayout.terminateAll()
     }
 
-    private func hasOpenSessions() -> Bool {
-        terminalLayout.hasOpenSessions
+    private func hasRunningSessions() -> Bool {
+        terminalLayout.hasRunningSessions
     }
 
     private func displayTitle(from rawTitle: String) -> String {
@@ -564,8 +661,21 @@ private struct TerminalLayout: Equatable {
         primary.id
     }
 
-    var hasOpenSessions: Bool {
-        !primary.sessions.isEmpty || secondary?.sessions.isEmpty == false
+    func paneID(containing sessionID: TerminalSession.ID) -> TerminalPane.ID? {
+        if primary.sessions.contains(where: { $0.id == sessionID }) {
+            return primary.id
+        }
+
+        if let secondary, secondary.sessions.contains(where: { $0.id == sessionID }) {
+            return secondary.id
+        }
+
+        return nil
+    }
+
+    var hasRunningSessions: Bool {
+        primary.sessions.contains { $0.isRunning }
+            || secondary?.sessions.contains { $0.isRunning } == true
     }
 
     mutating func toggleSplit(_ axis: TerminalSplitAxis) {
@@ -1173,20 +1283,18 @@ private struct TerminalPaneView: View {
                             isActive: isActivePane && session.id == pane.selectedSessionID,
                             startupCommand: session.startupCommand,
                             onRunningChanged: { isRunning in
-                                actions.updateSessionRunning(session.id, pane.id, isRunning)
+                                SSHSessionWindowManager.updateTerminalSessionRunning(session.id, isRunning: isRunning)
                             },
                             onNormalExit: {
-                                actions.scheduleNormalExitClose(session.id, pane.id)
+                                SSHSessionWindowManager.scheduleNormalExitClose(session.id)
                             },
                             onUnexpectedExit: { status in
                                 DispatchQueue.main.async {
-                                    if confirmReconnect(status) {
-                                        actions.reconnectSession(session.id, pane.id)
-                                    }
+                                    SSHSessionWindowManager.handleUnexpectedExit(session.id, status: status)
                                 }
                             },
                             onTitleChanged: { title in
-                                actions.updateSessionTitle(session.id, pane.id, title)
+                                SSHSessionWindowManager.updateTerminalSessionTitle(session.id, title: title)
                             }
                         )
                         .id(session.terminalID)
