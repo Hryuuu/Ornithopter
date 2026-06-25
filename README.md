@@ -2,7 +2,7 @@
 
 A simple, free SSH client for macOS with a lightweight terminal-focused workflow and easy file transfers.
 
-<img src="./Screenshots/main1.png">
+<img src="./Screenshots/main1.png" width="780">
 
 ## Install
 
