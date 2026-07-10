@@ -114,6 +114,15 @@
 				it,
 				th,
 				vi,
+				pt,
+				ru,
+				ar,
+				id,
+				hi,
+				tr,
+				pl,
+				nl,
+				uk,
 			);
 			mainGroup = 4F9BABC12FE3C753005C2C56;
 			minimizedProjectReferenceProxies = 1;
