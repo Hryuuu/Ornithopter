@@ -146,10 +146,12 @@
 "Deleted %@" = "Đã xóa %@";
 "Deleted %d items" = "Đã xóa %d mục";
 "Downloading %@..." = "Đang tải xuống %@...";
+"Downloading %d/%d %@..." = "Đang tải xuống %d/%d %@...";
 "Downloading %d items..." = "Đang tải xuống %d mục...";
 "Downloaded %@" = "Đã tải xuống %@";
 "Downloaded %d items" = "Đã tải xuống %d mục";
 "Uploading %@..." = "Đang tải lên %@...";
+"Uploading %d/%d %@..." = "Đang tải lên %d/%d %@...";
 "Uploading %d items..." = "Đang tải lên %d mục...";
 "Uploaded %@" = "Đã tải lên %@";
 "Uploaded %d items" = "Đã tải lên %d mục";

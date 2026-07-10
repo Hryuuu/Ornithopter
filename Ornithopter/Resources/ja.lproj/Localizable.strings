@@ -146,10 +146,12 @@
 "Deleted %@" = "%@を削除しました";
 "Deleted %d items" = "%d項目を削除しました";
 "Downloading %@..." = "%@をダウンロード中...";
+"Downloading %d/%d %@..." = "%d/%d %@をダウンロード中...";
 "Downloading %d items..." = "%d項目をダウンロード中...";
 "Downloaded %@" = "%@をダウンロードしました";
 "Downloaded %d items" = "%d項目をダウンロードしました";
 "Uploading %@..." = "%@をアップロード中...";
+"Uploading %d/%d %@..." = "%d/%d %@をアップロード中...";
 "Uploading %d items..." = "%d項目をアップロード中...";
 "Uploaded %@" = "%@をアップロードしました";
 "Uploaded %d items" = "%d項目をアップロードしました";

@@ -81,6 +81,15 @@ enum SSHCommandBuilder {
         return arguments
     }
 
+    nonisolated static func rsyncRemoteShell(for profile: ServerProfile, allowPassword: Bool = false) -> String {
+        var parts = ["ssh", "-o", "ConnectTimeout=5"]
+        if !allowPassword {
+            parts.append(contentsOf: ["-o", "BatchMode=yes"])
+        }
+        appendCommonOptions(for: profile, portOption: "-p", to: &parts)
+        return parts.joined(separator: " ")
+    }
+
     nonisolated static func sshCommand(for profile: ServerProfile) -> String {
         var parts = ["ssh"]
         appendCommonOptions(for: profile, portOption: "-p", to: &parts)

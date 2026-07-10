@@ -146,10 +146,12 @@
 "Deleted %@" = "ลบ %@ แล้ว";
 "Deleted %d items" = "ลบ %d รายการแล้ว";
 "Downloading %@..." = "กำลังดาวน์โหลด %@...";
+"Downloading %d/%d %@..." = "กำลังดาวน์โหลด %d/%d %@...";
 "Downloading %d items..." = "กำลังดาวน์โหลด %d รายการ...";
 "Downloaded %@" = "ดาวน์โหลด %@ แล้ว";
 "Downloaded %d items" = "ดาวน์โหลด %d รายการแล้ว";
 "Uploading %@..." = "กำลังอัปโหลด %@...";
+"Uploading %d/%d %@..." = "กำลังอัปโหลด %d/%d %@...";
 "Uploading %d items..." = "กำลังอัปโหลด %d รายการ...";
 "Uploaded %@" = "อัปโหลด %@ แล้ว";
 "Uploaded %d items" = "อัปโหลด %d รายการแล้ว";

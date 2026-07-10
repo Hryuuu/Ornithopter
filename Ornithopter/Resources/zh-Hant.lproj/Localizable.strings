@@ -146,10 +146,12 @@
 "Deleted %@" = "已刪除 %@";
 "Deleted %d items" = "已刪除 %d 個項目";
 "Downloading %@..." = "正在下載 %@...";
+"Downloading %d/%d %@..." = "正在下載 %d/%d %@...";
 "Downloading %d items..." = "正在下載 %d 個項目...";
 "Downloaded %@" = "已下載 %@";
 "Downloaded %d items" = "已下載 %d 個項目";
 "Uploading %@..." = "正在上傳 %@...";
+"Uploading %d/%d %@..." = "正在上傳 %d/%d %@...";
 "Uploading %d items..." = "正在上傳 %d 個項目...";
 "Uploaded %@" = "已上傳 %@";
 "Uploaded %d items" = "已上傳 %d 個項目";

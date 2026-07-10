@@ -146,10 +146,12 @@
 "Deleted %@" = "%@ gelöscht";
 "Deleted %d items" = "%d Objekte gelöscht";
 "Downloading %@..." = "%@ wird heruntergeladen...";
+"Downloading %d/%d %@..." = "%d/%d %@ wird heruntergeladen...";
 "Downloading %d items..." = "%d Objekte werden heruntergeladen...";
 "Downloaded %@" = "%@ heruntergeladen";
 "Downloaded %d items" = "%d Objekte heruntergeladen";
 "Uploading %@..." = "%@ wird hochgeladen...";
+"Uploading %d/%d %@..." = "%d/%d %@ wird hochgeladen...";
 "Uploading %d items..." = "%d Objekte werden hochgeladen...";
 "Uploaded %@" = "%@ hochgeladen";
 "Uploaded %d items" = "%d Objekte hochgeladen";

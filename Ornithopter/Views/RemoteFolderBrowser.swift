@@ -49,7 +49,12 @@ private nonisolated struct RemoteSubprocessResult {
 
 private nonisolated final class RemoteProcessOutputCollector: @unchecked Sendable {
     private let lock = NSLock()
+    private let outputHandler: (@Sendable (String) -> Void)?
     private var data = Data()
+
+    init(outputHandler: (@Sendable (String) -> Void)? = nil) {
+        self.outputHandler = outputHandler
+    }
 
     func start(readingFrom fileHandle: FileHandle) {
         fileHandle.readabilityHandler = { [weak self] handle in
@@ -80,9 +85,123 @@ private nonisolated final class RemoteProcessOutputCollector: @unchecked Sendabl
             return
         }
 
+        outputHandler?(String(decoding: chunk, as: UTF8.self))
+
         lock.lock()
         data.append(chunk)
         lock.unlock()
+    }
+}
+
+private nonisolated struct RemoteTransferProgress: Sendable {
+    let itemName: String
+    let itemIndex: Int?
+    let itemCount: Int?
+    let percent: Int
+}
+
+private nonisolated struct RsyncProgressEvent {
+    let itemName: String?
+    let itemIndex: Int?
+    let percent: Int
+}
+
+private nonisolated final class RsyncProgressParser: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pendingLine = ""
+    private var currentItemName: String?
+    private var seenItemNames: Set<String> = []
+    private var itemIndex = 0
+    private var lastEmittedItemName: String?
+    private var lastEmittedPercent: Int?
+
+    func append(_ text: String) -> RsyncProgressEvent? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var latestEvent: RsyncProgressEvent?
+        for character in text {
+            if character == "\n" || character == "\r" {
+                latestEvent = processLine(pendingLine) ?? latestEvent
+                pendingLine.removeAll(keepingCapacity: true)
+            } else {
+                pendingLine.append(character)
+            }
+        }
+
+        if let event = processLine(pendingLine) {
+            latestEvent = event
+        }
+
+        return latestEvent
+    }
+
+    private func processLine(_ line: String) -> RsyncProgressEvent? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        if let percent = Self.latestPercent(in: trimmed) {
+            let name = currentItemName
+            let index = itemIndexForCurrentName()
+            guard percent != lastEmittedPercent || name != lastEmittedItemName else {
+                return nil
+            }
+
+            lastEmittedPercent = percent
+            lastEmittedItemName = name
+            return RsyncProgressEvent(itemName: name, itemIndex: index, percent: percent)
+        }
+
+        guard Self.looksLikeItemName(trimmed) else {
+            return nil
+        }
+
+        currentItemName = trimmed
+        return nil
+    }
+
+    private func itemIndexForCurrentName() -> Int? {
+        guard let currentItemName else {
+            return nil
+        }
+
+        if !seenItemNames.contains(currentItemName) {
+            seenItemNames.insert(currentItemName)
+            itemIndex += 1
+        }
+
+        return itemIndex
+    }
+
+    private static func latestPercent(in text: String) -> Int? {
+        var digits = ""
+        var latest: Int?
+
+        for character in text {
+            if character.isNumber {
+                digits.append(character)
+            } else if character == "%" {
+                if let value = Int(digits), (0...100).contains(value) {
+                    latest = value
+                }
+                digits.removeAll(keepingCapacity: true)
+            } else {
+                digits.removeAll(keepingCapacity: true)
+            }
+        }
+
+        return latest
+    }
+
+    private static func looksLikeItemName(_ line: String) -> Bool {
+        !line.hasPrefix("sending incremental file list")
+            && !line.hasPrefix("receiving incremental file list")
+            && !line.hasPrefix("sent ")
+            && !line.hasPrefix("total size is ")
+            && !line.hasPrefix("speedup is ")
+            && !line.contains("%")
     }
 }
 
@@ -100,6 +219,7 @@ final class RemoteFileStore: ObservableObject {
     @Published private(set) var copiedItems: [RemoteFileItem] = []
     @Published private(set) var newFolderParent: String?
     @Published private(set) var status = NSLocalizedString("Not loaded", comment: "")
+    @Published private(set) var transferPercent: Double?
 
     static let acceptedDropTypes: [UTType] = [.item, .fileURL]
 
@@ -112,6 +232,19 @@ final class RemoteFileStore: ObservableObject {
 
     private nonisolated static func localizedFormat(_ key: String, _ arguments: CVarArg...) -> String {
         String(format: NSLocalizedString(key, comment: ""), arguments: arguments)
+    }
+
+    private nonisolated static func transferStatus(formatKey: String, multiItemFormatKey: String, progress: RemoteTransferProgress) -> String {
+        let message: String
+        if let itemIndex = progress.itemIndex,
+           let itemCount = progress.itemCount,
+           itemCount > 1 {
+            message = localizedFormat(multiItemFormatKey, itemIndex, itemCount, progress.itemName)
+        } else {
+            message = localizedFormat(formatKey, progress.itemName)
+        }
+
+        return message + " \(progress.percent)%"
     }
 
     init(profile: ServerProfile, sessionPassword: String?) {
@@ -507,13 +640,33 @@ final class RemoteFileStore: ObservableObject {
         }
 
         downloadingPaths.insert(item.path)
+        transferPercent = nil
         status = Self.localizedFormat("Downloading %@...", item.name)
 
         Task.detached { [profile, sessionPassword] in
-            let result = Self.downloadItem(item, to: destination, profile: profile, password: sessionPassword)
+            let result = Self.downloadItem(
+                item,
+                to: destination,
+                profile: profile,
+                password: sessionPassword
+            ) { progress in
+                Task { @MainActor [weak self] in
+                    guard let self, self.downloadingPaths.contains(item.path) else {
+                        return
+                    }
+
+                    self.transferPercent = Double(progress.percent) / 100
+                    self.status = Self.transferStatus(
+                        formatKey: "Downloading %@...",
+                        multiItemFormatKey: "Downloading %d/%d %@...",
+                        progress: progress
+                    )
+                }
+            }
 
             await MainActor.run {
                 self.downloadingPaths.remove(item.path)
+                self.transferPercent = nil
 
                 switch result {
                 case .success:
@@ -535,15 +688,36 @@ final class RemoteFileStore: ObservableObject {
         for item in itemsToDownload {
             downloadingPaths.insert(item.path)
         }
+        transferPercent = nil
         status = Self.localizedFormat("Downloading %d items...", itemsToDownload.count)
 
         Task.detached { [profile, sessionPassword] in
-            let result = Self.downloadItems(itemsToDownload, toDirectory: destination, profile: profile, password: sessionPassword)
+            let result = Self.downloadItems(
+                itemsToDownload,
+                toDirectory: destination,
+                profile: profile,
+                password: sessionPassword
+            ) { progress in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          itemsToDownload.contains(where: { self.downloadingPaths.contains($0.path) }) else {
+                        return
+                    }
+
+                    self.transferPercent = Double(progress.percent) / 100
+                    self.status = Self.transferStatus(
+                        formatKey: "Downloading %@...",
+                        multiItemFormatKey: "Downloading %d/%d %@...",
+                        progress: progress
+                    )
+                }
+            }
 
             await MainActor.run {
                 for item in itemsToDownload {
                     self.downloadingPaths.remove(item.path)
                 }
+                self.transferPercent = nil
 
                 switch result {
                 case .success:
@@ -573,29 +747,75 @@ final class RemoteFileStore: ObservableObject {
             forTypeIdentifier: typeIdentifier,
             fileOptions: [],
             visibility: .all
-        ) { [profile, sessionPassword] completion in
-            let progress = Progress(totalUnitCount: 1)
+        ) { [profile, sessionPassword, store = self] completion in
+            let providerProgress = Progress(totalUnitCount: 100)
 
-            Task.detached {
+            Task { @MainActor [weak store] in
+                guard let store else {
+                    return
+                }
+
+                for item in items {
+                    store.downloadingPaths.insert(item.path)
+                }
+                store.transferPercent = nil
+                store.status = items.count == 1
+                    ? Self.localizedFormat("Downloading %@...", items[0].name)
+                    : Self.localizedFormat("Downloading %d items...", items.count)
+            }
+
+            Task.detached { [store] in
                 let destination = Self.temporaryDragDestination(for: items, draggedItem: item)
                 try? FileManager.default.removeItem(at: destination)
 
-                let result = Self.downloadDragItems(items, to: destination, profile: profile, password: sessionPassword)
+                let result = Self.downloadDragItems(
+                    items,
+                    to: destination,
+                    profile: profile,
+                    password: sessionPassword
+                ) { progress in
+                    providerProgress.completedUnitCount = Int64(progress.percent)
+
+                    Task { @MainActor [store] in
+                        guard items.contains(where: { store.downloadingPaths.contains($0.path) }) else {
+                            return
+                        }
+
+                        store.transferPercent = Double(progress.percent) / 100
+                        store.status = Self.transferStatus(
+                            formatKey: "Downloading %@...",
+                            multiItemFormatKey: "Downloading %d/%d %@...",
+                            progress: progress
+                        )
+                    }
+                }
 
                 switch result {
                 case .success:
-                    progress.completedUnitCount = 1
+                    providerProgress.completedUnitCount = 100
                     completion(destination, false, nil)
                 case .failure(let error):
                     completion(nil, false, error)
                 }
 
-                Task { @MainActor in
+                Task { @MainActor [store] in
+                    for item in items {
+                        store.downloadingPaths.remove(item.path)
+                    }
+                    store.transferPercent = nil
+                    switch result {
+                    case .success:
+                        store.status = items.count == 1
+                            ? Self.localizedFormat("Downloaded %@", items[0].name)
+                            : Self.localizedFormat("Downloaded %d items", items.count)
+                    case .failure(let error):
+                        store.status = error.localizedDescription
+                    }
                     AppDragRegistry.clearActiveRemoteFileDrag(token)
                 }
             }
 
-            return progress
+            return providerProgress
         }
 
         return provider
@@ -800,6 +1020,7 @@ final class RemoteFileStore: ObservableObject {
         }
 
         uploadingPaths.insert(remoteDirectory)
+        transferPercent = nil
         status = urls.count == 1
             ? Self.localizedFormat("Uploading %@...", urls[0].lastPathComponent)
             : Self.localizedFormat("Uploading %d items...", urls.count)
@@ -811,7 +1032,25 @@ final class RemoteFileStore: ObservableObject {
                 if let message = Self.validateUploadSources(urls, existingItems: remoteItems).message {
                     result = .failure(RemoteFileError(message: message))
                 } else {
-                    result = Self.uploadItems(urls, to: remoteDirectory, profile: profile, password: sessionPassword)
+                    result = Self.uploadItems(
+                        urls,
+                        to: remoteDirectory,
+                        profile: profile,
+                        password: sessionPassword
+                    ) { progress in
+                        Task { @MainActor [weak self] in
+                            guard let self, self.uploadingPaths.contains(remoteDirectory) else {
+                                return
+                            }
+
+                            self.transferPercent = Double(progress.percent) / 100
+                            self.status = Self.transferStatus(
+                                formatKey: "Uploading %@...",
+                                multiItemFormatKey: "Uploading %d/%d %@...",
+                                progress: progress
+                            )
+                        }
+                    }
                 }
             case .failure(let error):
                 result = .failure(error)
@@ -819,6 +1058,7 @@ final class RemoteFileStore: ObservableObject {
 
             await MainActor.run {
                 self.uploadingPaths.remove(remoteDirectory)
+                self.transferPercent = nil
 
                 switch result {
                 case .success:
@@ -960,7 +1200,45 @@ final class RemoteFileStore: ObservableObject {
         }
     }
 
-    private nonisolated static func downloadItem(_ item: RemoteFileItem, to destination: URL, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
+    private nonisolated static func downloadItem(
+        _ item: RemoteFileItem,
+        to destination: URL,
+        profile: ServerProfile,
+        password: String?,
+        progress: (@Sendable (RemoteTransferProgress) -> Void)? = nil
+    ) -> Result<Void, RemoteFileError> {
+        let didAccess = destination.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                destination.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        if isRsyncAvailable {
+            let transferUnitCount = item.isDirectory
+                ? remoteTransferUnitCount(for: item, profile: profile, password: password)
+                : 1
+            switch downloadItemWithRsync(
+                item,
+                to: destination,
+                profile: profile,
+                password: password,
+                transferUnitCount: transferUnitCount > 1 ? transferUnitCount : nil,
+                progress: progress
+            ) {
+            case .success:
+                return .success(())
+            case .failure(let error) where shouldFallbackFromRsync(error):
+                break
+            case .failure(let error):
+                return .failure(error)
+            }
+        }
+
+        return downloadItemWithSFTP(item, to: destination, profile: profile, password: password)
+    }
+
+    private nonisolated static func downloadItemWithSFTP(_ item: RemoteFileItem, to destination: URL, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
         let command = item.isDirectory
             ? "get -R \(sftpQuoted(item.path)) \(sftpQuoted(destination.path))"
             : "get \(sftpQuoted(item.path)) \(sftpQuoted(destination.path))"
@@ -988,7 +1266,60 @@ final class RemoteFileStore: ObservableObject {
         }
     }
 
-    private nonisolated static func downloadItems(_ items: [RemoteFileItem], toDirectory destination: URL, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
+    private nonisolated static func downloadItems(
+        _ items: [RemoteFileItem],
+        toDirectory destination: URL,
+        profile: ServerProfile,
+        password: String?,
+        progress: (@Sendable (RemoteTransferProgress) -> Void)? = nil
+    ) -> Result<Void, RemoteFileError> {
+        let didAccess = destination.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                destination.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        if isRsyncAvailable {
+            let transferUnitCounts = items.map { remoteTransferUnitCount(for: $0, profile: profile, password: password) }
+            let totalTransferUnitCount = transferUnitCounts.reduce(0, +)
+            var completedTransferUnitCount = 0
+
+            for (index, item) in items.enumerated() {
+                let transferUnitCount = transferUnitCounts[index]
+                switch downloadItemToDirectoryWithRsync(
+                    item,
+                    toDirectory: destination,
+                    profile: profile,
+                    password: password,
+                    itemIndex: index + 1,
+                    itemCount: items.count,
+                    itemOffset: totalTransferUnitCount > 1 ? completedTransferUnitCount : nil,
+                    transferUnitCount: totalTransferUnitCount > 1 ? totalTransferUnitCount : nil,
+                    progress: progress
+                ) {
+                case .success:
+                    completedTransferUnitCount += transferUnitCount
+                    continue
+                case .failure(let error) where shouldFallbackFromRsync(error):
+                    return downloadItemsWithSFTP(
+                        Array(items.dropFirst(index)),
+                        toDirectory: destination,
+                        profile: profile,
+                        password: password
+                    )
+                case .failure(let error):
+                    return .failure(error)
+                }
+            }
+
+            return .success(())
+        }
+
+        return downloadItemsWithSFTP(items, toDirectory: destination, profile: profile, password: password)
+    }
+
+    private nonisolated static func downloadItemsWithSFTP(_ items: [RemoteFileItem], toDirectory destination: URL, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
         let commands = items.map { item in
             let option = item.isDirectory ? "-R " : ""
             return "get \(option)\(sftpQuoted(item.path)) \(sftpQuoted(destination.path))"
@@ -998,13 +1329,19 @@ final class RemoteFileStore: ObservableObject {
         return runSFTPCommands(commands, profile: profile, password: password, fallbackMessage: "SFTP download failed")
     }
 
-    private nonisolated static func downloadDragItems(_ items: [RemoteFileItem], to destination: URL, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
+    private nonisolated static func downloadDragItems(
+        _ items: [RemoteFileItem],
+        to destination: URL,
+        profile: ServerProfile,
+        password: String?,
+        progress: (@Sendable (RemoteTransferProgress) -> Void)? = nil
+    ) -> Result<Void, RemoteFileError> {
         guard items.count > 1 else {
             guard let item = items.first else {
                 return .failure(RemoteFileError(message: localized("Nothing to download")))
             }
 
-            return downloadItem(item, to: destination, profile: profile, password: password)
+            return downloadItem(item, to: destination, profile: profile, password: password, progress: progress)
         }
 
         do {
@@ -1013,15 +1350,61 @@ final class RemoteFileStore: ObservableObject {
             return .failure(RemoteFileError(message: error.localizedDescription))
         }
 
-        return downloadItems(items, toDirectory: destination, profile: profile, password: password)
+        return downloadItems(items, toDirectory: destination, profile: profile, password: password, progress: progress)
     }
 
-    private nonisolated static func uploadItems(_ urls: [URL], to remoteDirectory: String, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
+    private nonisolated static func uploadItems(
+        _ urls: [URL],
+        to remoteDirectory: String,
+        profile: ServerProfile,
+        password: String?,
+        progress: (@Sendable (RemoteTransferProgress) -> Void)? = nil
+    ) -> Result<Void, RemoteFileError> {
         let scopedURLs = urls.filter { $0.startAccessingSecurityScopedResource() }
         defer {
             scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         }
 
+        if isRsyncAvailable {
+            let transferUnitCounts = urls.map { transferUnitCount(for: $0) }
+            let totalTransferUnitCount = transferUnitCounts.reduce(0, +)
+            var completedTransferUnitCount = 0
+
+            for (index, url) in urls.enumerated() {
+                let transferUnitCount = transferUnitCounts[index]
+                switch uploadItemWithRsync(
+                    url,
+                    to: remoteDirectory,
+                    profile: profile,
+                    password: password,
+                    itemIndex: index + 1,
+                    itemCount: urls.count,
+                    itemOffset: totalTransferUnitCount > 1 ? completedTransferUnitCount : nil,
+                    transferUnitCount: totalTransferUnitCount > 1 ? totalTransferUnitCount : nil,
+                    progress: progress
+                ) {
+                case .success:
+                    completedTransferUnitCount += transferUnitCount
+                    continue
+                case .failure(let error) where shouldFallbackFromRsync(error):
+                    return uploadItemsWithSFTP(
+                        Array(urls.dropFirst(index)),
+                        to: remoteDirectory,
+                        profile: profile,
+                        password: password
+                    )
+                case .failure(let error):
+                    return .failure(error)
+                }
+            }
+
+            return .success(())
+        }
+
+        return uploadItemsWithSFTP(urls, to: remoteDirectory, profile: profile, password: password)
+    }
+
+    private nonisolated static func uploadItemsWithSFTP(_ urls: [URL], to remoteDirectory: String, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
         let commands = urls.map { url in
             let remoteTarget = joined(remoteDirectory, url.lastPathComponent)
             let option = isDirectory(url) ? "-R " : ""
@@ -1030,6 +1413,262 @@ final class RemoteFileStore: ObservableObject {
         .joined(separator: "\n")
 
         return runSFTPCommands(commands, profile: profile, password: password, fallbackMessage: "SFTP upload failed")
+    }
+
+    private nonisolated static func remoteTransferUnitCount(for item: RemoteFileItem, profile: ServerProfile, password: String?) -> Int {
+        guard item.isDirectory else {
+            return 1
+        }
+
+        switch remoteTransferUnitCount(forDirectory: item.path, profile: profile, password: password) {
+        case .success(let count):
+            return max(count, 1)
+        case .failure:
+            return 1
+        }
+    }
+
+    private nonisolated static func remoteTransferUnitCount(forDirectory path: String, profile: ServerProfile, password: String?) -> Result<Int, RemoteFileError> {
+        switch loadDirectory(profile: profile, path: path, password: password) {
+        case .success(let items):
+            var count = 0
+            for item in items {
+                if item.isDirectory {
+                    switch remoteTransferUnitCount(forDirectory: item.path, profile: profile, password: password) {
+                    case .success(let childCount):
+                        count += childCount
+                    case .failure(let error):
+                        return .failure(error)
+                    }
+                } else {
+                    count += 1
+                }
+            }
+            return .success(count)
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
+    private nonisolated static var isRsyncAvailable: Bool {
+        FileManager.default.isExecutableFile(atPath: "/usr/bin/rsync")
+    }
+
+    private nonisolated static func uploadItemWithRsync(
+        _ url: URL,
+        to remoteDirectory: String,
+        profile: ServerProfile,
+        password: String?,
+        itemIndex: Int? = nil,
+        itemCount: Int? = nil,
+        itemOffset: Int? = nil,
+        transferUnitCount: Int? = nil,
+        progress: (@Sendable (RemoteTransferProgress) -> Void)?
+    ) -> Result<Void, RemoteFileError> {
+        runRsyncTransfer(
+            sources: [url.path],
+            destination: rsyncRemoteSpec(profile: profile, path: directoryPathForRsync(remoteDirectory)),
+            itemName: url.lastPathComponent,
+            itemIndex: itemIndex,
+            itemCount: itemCount,
+            itemOffset: itemOffset,
+            transferUnitCount: transferUnitCount,
+            profile: profile,
+            password: password,
+            fallbackMessage: "Rsync upload failed",
+            progress: progress
+        )
+    }
+
+    private nonisolated static func downloadItemWithRsync(
+        _ item: RemoteFileItem,
+        to destination: URL,
+        profile: ServerProfile,
+        password: String?,
+        itemIndex: Int? = nil,
+        itemCount: Int? = nil,
+        itemOffset: Int? = nil,
+        transferUnitCount: Int? = nil,
+        progress: (@Sendable (RemoteTransferProgress) -> Void)?
+    ) -> Result<Void, RemoteFileError> {
+        if item.isDirectory {
+            let destinationExisted = FileManager.default.fileExists(atPath: destination.path)
+            do {
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            } catch {
+                return .failure(RemoteFileError(message: error.localizedDescription))
+            }
+
+            let result = runRsyncTransfer(
+                sources: [rsyncRemoteSpec(profile: profile, path: directoryPathForRsync(item.path))],
+                destination: directoryPathForRsync(destination.path),
+                itemName: item.name,
+                itemIndex: itemIndex,
+                itemCount: itemCount,
+                itemOffset: itemOffset,
+                transferUnitCount: transferUnitCount,
+                profile: profile,
+                password: password,
+                fallbackMessage: "Rsync download failed",
+                progress: progress
+            )
+
+            if !destinationExisted,
+               case .failure(let error) = result,
+               shouldFallbackFromRsync(error) {
+                tryRemoveEmptyDirectory(at: destination)
+            }
+            return result
+        }
+
+        return runRsyncTransfer(
+            sources: [rsyncRemoteSpec(profile: profile, path: item.path)],
+            destination: destination.path,
+            itemName: item.name,
+            itemIndex: itemIndex,
+            itemCount: itemCount,
+            itemOffset: itemOffset,
+            transferUnitCount: transferUnitCount,
+            profile: profile,
+            password: password,
+            fallbackMessage: "Rsync download failed",
+            progress: progress
+        )
+    }
+
+    private nonisolated static func downloadItemToDirectoryWithRsync(
+        _ item: RemoteFileItem,
+        toDirectory destination: URL,
+        profile: ServerProfile,
+        password: String?,
+        itemIndex: Int? = nil,
+        itemCount: Int? = nil,
+        itemOffset: Int? = nil,
+        transferUnitCount: Int? = nil,
+        progress: (@Sendable (RemoteTransferProgress) -> Void)?
+    ) -> Result<Void, RemoteFileError> {
+        runRsyncTransfer(
+            sources: [rsyncRemoteSpec(profile: profile, path: item.path)],
+            destination: directoryPathForRsync(destination.path),
+            itemName: item.name,
+            itemIndex: itemIndex,
+            itemCount: itemCount,
+            itemOffset: itemOffset,
+            transferUnitCount: transferUnitCount,
+            profile: profile,
+            password: password,
+            fallbackMessage: "Rsync download failed",
+            progress: progress
+        )
+    }
+
+    private nonisolated static func runRsyncTransfer(
+        sources: [String],
+        destination: String,
+        itemName: String,
+        itemIndex: Int?,
+        itemCount: Int?,
+        itemOffset: Int? = nil,
+        transferUnitCount: Int? = nil,
+        profile: ServerProfile,
+        password: String?,
+        fallbackMessage: String,
+        progress: (@Sendable (RemoteTransferProgress) -> Void)?
+    ) -> Result<Void, RemoteFileError> {
+        let parser = RsyncProgressParser()
+        var arguments = [
+            "-a",
+            "--partial",
+            "--progress",
+            "--timeout=60",
+            "-e",
+            SSHCommandBuilder.rsyncRemoteShell(for: profile, allowPassword: password != nil)
+        ]
+        arguments.append(contentsOf: sources)
+        arguments.append(destination)
+
+        let askPassSession = SSHAskPassSession(password: password)
+        defer {
+            askPassSession?.stop()
+        }
+
+        let result = runProcess(
+            executablePath: "/usr/bin/rsync",
+            arguments: arguments,
+            environment: remoteProcessEnvironment(askPassSession: askPassSession),
+            input: nil,
+            timeoutMessage: localizedFormat("%@: timed out", fallbackMessage),
+            overallTimeout: nil
+        ) { text in
+            guard let event = parser.append(text) else {
+                return
+            }
+
+            let resolvedItemIndex = event.itemIndex.map { (itemOffset ?? 0) + $0 } ?? itemIndex
+            let resolvedItemCount = event.itemIndex == nil ? itemCount : (transferUnitCount ?? itemCount)
+
+            progress?(
+                RemoteTransferProgress(
+                    itemName: event.itemName ?? itemName,
+                    itemIndex: resolvedItemIndex,
+                    itemCount: resolvedItemCount,
+                    percent: event.percent
+                )
+            )
+        }
+
+        switch result {
+        case .success(let subprocessResult):
+            guard subprocessResult.terminationStatus == 0 else {
+                let message = [subprocessResult.errorText, subprocessResult.outputText]
+                    .joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return .failure(RemoteFileError(message: message.isEmpty ? fallbackMessage : message))
+            }
+            if transferUnitCount == nil {
+                progress?(
+                    RemoteTransferProgress(
+                        itemName: itemName,
+                        itemIndex: itemIndex,
+                        itemCount: itemCount,
+                        percent: 100
+                    )
+                )
+            }
+            return .success(())
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
+    private nonisolated static func shouldFallbackFromRsync(_ error: RemoteFileError) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        return message.contains("rsync: command not found")
+            || message.contains("rsync: not found")
+            || message.contains("rsync not found")
+            || (message.contains("rsync") && message.contains("no such file or directory"))
+            || message.contains("protocol version mismatch")
+            || message.contains("incompatible rsync")
+    }
+
+    private nonisolated static func rsyncRemoteSpec(profile: ServerProfile, path: String) -> String {
+        "\(profile.destination):\(SSHCommandBuilder.shellQuotedArgument(path))"
+    }
+
+    private nonisolated static func directoryPathForRsync(_ path: String) -> String {
+        if path.isEmpty {
+            return "./"
+        }
+        return path.hasSuffix("/") ? path : "\(path)/"
+    }
+
+    private nonisolated static func tryRemoveEmptyDirectory(at url: URL) {
+        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: url.path),
+              contents.isEmpty else {
+            return
+        }
+
+        try? FileManager.default.removeItem(at: url)
     }
 
     private nonisolated static func copyItems(_ items: [RemoteFileItem], to remoteDirectory: String, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
@@ -1275,14 +1914,16 @@ final class RemoteFileStore: ObservableObject {
         arguments: [String],
         environment: [String: String],
         input: String?,
-        timeoutMessage: String
+        timeoutMessage: String,
+        overallTimeout: TimeInterval? = 20,
+        outputHandler: (@Sendable (String) -> Void)? = nil
     ) -> Result<RemoteSubprocessResult, RemoteFileError> {
         let process = Process()
         let inputPipe = input.map { _ in Pipe() }
         let output = Pipe()
         let errorPipe = Pipe()
-        let outputCollector = RemoteProcessOutputCollector()
-        let errorCollector = RemoteProcessOutputCollector()
+        let outputCollector = RemoteProcessOutputCollector(outputHandler: outputHandler)
+        let errorCollector = RemoteProcessOutputCollector(outputHandler: outputHandler)
 
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
@@ -1301,7 +1942,7 @@ final class RemoteFileStore: ObservableObject {
                 try? inputPipe.fileHandleForWriting.close()
             }
 
-            guard waitForSFTPProcess(process) else {
+            guard waitForProcess(process, timeout: overallTimeout) else {
                 outputCollector.stop(readingFrom: output.fileHandleForReading)
                 errorCollector.stop(readingFrom: errorPipe.fileHandleForReading)
                 return .failure(RemoteFileError(message: timeoutMessage))
@@ -1324,6 +1965,30 @@ final class RemoteFileStore: ObservableObject {
 
     private nonisolated static func isDirectory(_ url: URL) -> Bool {
         (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
+    private nonisolated static func transferUnitCount(for url: URL) -> Int {
+        guard isDirectory(url) else {
+            return 1
+        }
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [],
+            errorHandler: nil
+        ) else {
+            return 1
+        }
+
+        var count = 0
+        for case let childURL as URL in enumerator {
+            if (try? childURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+                count += 1
+            }
+        }
+
+        return max(count, 1)
     }
 
     private nonisolated static func dragSuggestedName(for item: RemoteFileItem) -> String {
@@ -1374,8 +2039,13 @@ final class RemoteFileStore: ObservableObject {
             .merging(askPassSession?.environment ?? [:]) { _, new in new }
     }
 
-    private nonisolated static func waitForSFTPProcess(_ process: Process, timeout: TimeInterval = 20) -> Bool {
+    private nonisolated static func waitForProcess(_ process: Process, timeout: TimeInterval?) -> Bool {
         guard process.isRunning else {
+            return true
+        }
+
+        guard let timeout else {
+            process.waitUntilExit()
             return true
         }
 
@@ -1792,11 +2462,19 @@ struct RemoteFolderBrowser: View {
                 .disabled(store.hasMultipleSelection)
             }
 
-            Text(store.status)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .padding(10)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(store.status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+
+                if let transferPercent = store.transferPercent {
+                    ProgressView(value: transferPercent)
+                        .progressViewStyle(.linear)
+                        .controlSize(.small)
+                }
+            }
+            .padding(10)
         }
         .frame(minWidth: 220)
         .background(EscapeKeyHandler(action: store.clearSelection))
