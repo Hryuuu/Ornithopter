@@ -250,6 +250,7 @@ struct ConnectionWindowView: View {
     @AppStorage("defaultTextEditor") private var defaultTextEditor = AppPreferenceDefaults.textEditor
     @AppStorage("customTextEditor") private var customTextEditor = AppPreferenceDefaults.customTextEditor
     @AppStorage("autoCloseTerminalTabOnNormalExit") private var autoCloseTerminalTabOnNormalExit = AppPreferenceDefaults.autoCloseTerminalTabOnNormalExit
+    @StateObject private var profileStore = ProfileStore()
     @State private var isExplorerVisible = true
     @State private var terminalLayout: TerminalLayout
     @State private var activePaneID: TerminalPane.ID?
@@ -268,6 +269,7 @@ struct ConnectionWindowView: View {
                 if isExplorerVisible {
                     RemoteFolderBrowser(
                         profile: profile,
+                        availableProfiles: profileStore.profiles,
                         sessionPassword: sessionPassword,
                         collapseAction: {
                             isExplorerVisible = false

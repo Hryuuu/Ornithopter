@@ -205,6 +205,133 @@ private nonisolated final class RsyncProgressParser: @unchecked Sendable {
     }
 }
 
+private final class RemoteFolderChooserController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+    enum Action {
+        case choose
+        case open
+        case up
+        case refresh
+        case newFolder
+        case cancel
+    }
+
+    let tableView = NSTableView()
+    var action: Action = .cancel
+    var folders: [RemoteFileItem]
+    weak var panel: NSPanel?
+    weak var messageLabel: NSTextField?
+    weak var pathField: NSTextField?
+    weak var emptyLabel: NSTextField?
+
+    init(folders: [RemoteFileItem]) {
+        self.folders = folders
+        super.init()
+    }
+
+    var selectedFolderPath: String? {
+        let row = tableView.selectedRow
+        guard folders.indices.contains(row) else {
+            return nil
+        }
+
+        return folders[row].path
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        folders.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard folders.indices.contains(row) else {
+            return nil
+        }
+
+        let identifier = NSUserInterfaceItemIdentifier("RemoteFolderCell")
+        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? NSTableCellView()
+        cell.identifier = identifier
+
+        let imageView = cell.imageView ?? NSImageView(frame: NSRect(x: 8, y: 3, width: 18, height: 18))
+        imageView.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+        imageView.contentTintColor = .controlAccentColor
+        if imageView.superview == nil {
+            cell.addSubview(imageView)
+        }
+        cell.imageView = imageView
+
+        let textField = cell.textField ?? NSTextField(labelWithString: "")
+        textField.frame = NSRect(x: 34, y: 3, width: max(40, tableView.bounds.width - 42), height: 18)
+        textField.autoresizingMask = [.width]
+        textField.lineBreakMode = .byTruncatingMiddle
+        if textField.superview == nil {
+            cell.addSubview(textField)
+        }
+        textField.stringValue = folders[row].name
+        cell.textField = textField
+
+        return cell
+    }
+
+    func update(path: String, message: String, folders: [RemoteFileItem]) {
+        self.folders = folders
+        pathField?.stringValue = path
+        messageLabel?.stringValue = message
+        emptyLabel?.isHidden = !folders.isEmpty
+        tableView.reloadData()
+        tableView.deselectAll(nil)
+    }
+
+    @objc func chooseFolder() {
+        finish(.choose)
+    }
+
+    @objc func openFolder() {
+        guard selectedFolderPath != nil else {
+            return
+        }
+
+        finish(.open)
+    }
+
+    @objc func goUp() {
+        finish(.up)
+    }
+
+    @objc func refresh() {
+        finish(.refresh)
+    }
+
+    @objc func newFolder() {
+        finish(.newFolder)
+    }
+
+    @objc func cancel() {
+        finish(.cancel)
+    }
+
+    @objc func doubleClickRow() {
+        openFolder()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard action == .cancel else {
+            return
+        }
+
+        NSApp.stopModal()
+    }
+
+    private func finish(_ action: Action) {
+        self.action = action
+        NSApp.stopModal()
+        switch action {
+        case .choose, .cancel:
+            panel?.close()
+        case .open, .up, .refresh, .newFolder:
+            break
+        }
+    }
+}
+
 @MainActor
 final class RemoteFileStore: ObservableObject {
     @Published private(set) var currentPath: String
@@ -245,6 +372,44 @@ final class RemoteFileStore: ObservableObject {
         }
 
         return message + " \(progress.percent)%"
+    }
+
+    private func showTransferFailureAlert(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = Self.localized("File Transfer Failed")
+        alert.informativeText = Self.localizedFormat("Reason: %@", Self.transferFailureReason(for: message)) + "\n\n" + message
+        alert.addButton(withTitle: Self.localized("OK"))
+        alert.runModal()
+    }
+
+    private nonisolated static func transferFailureReason(for message: String) -> String {
+        let lowercasedMessage = message.lowercased()
+
+        if lowercasedMessage.contains("already exists") {
+            return localized("An item with the same name already exists")
+        }
+        if lowercasedMessage.contains("no space left") || lowercasedMessage.contains("disk full") {
+            return localized("Not enough disk space")
+        }
+        if lowercasedMessage.contains("no such file")
+            || lowercasedMessage.contains("not found")
+            || lowercasedMessage.contains("couldn't stat") {
+            return localized("File or folder not found")
+        }
+        if lowercasedMessage.contains("timed out") || lowercasedMessage.contains("timeout") {
+            return localized("Connection timed out")
+        }
+        if lowercasedMessage.contains("authentication failed")
+            || lowercasedMessage.contains("permission denied (publickey")
+            || lowercasedMessage.contains("permission denied (password") {
+            return localized("Authentication failed")
+        }
+        if lowercasedMessage.contains("permission denied") {
+            return localized("Permission denied")
+        }
+
+        return localized("Transfer command failed")
     }
 
     init(profile: ServerProfile, sessionPassword: String?) {
@@ -384,6 +549,12 @@ final class RemoteFileStore: ObservableObject {
         selectedPaths.count > 1
     }
 
+    func serverTransferTargets(from profiles: [ServerProfile]) -> [ServerProfile] {
+        profiles
+            .filter { $0.id != profile.id && !$0.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+    }
+
     func isCreatingFolder(in path: String) -> Bool {
         newFolderParent == path
     }
@@ -484,7 +655,9 @@ final class RemoteFileStore: ObservableObject {
                         : Self.localizedFormat("Pasted %d items", itemsToPaste.count)
                     self.reloadAfterUpload(to: destinationDirectory)
                 case .failure(let error):
-                    self.status = "\(destinationDirectory): \(error.localizedDescription)"
+                    let message = "\(destinationDirectory): \(error.localizedDescription)"
+                    self.status = message
+                    self.showTransferFailureAlert(message)
                 }
             }
         }
@@ -672,7 +845,9 @@ final class RemoteFileStore: ObservableObject {
                 case .success:
                     self.status = Self.localizedFormat("Downloaded %@", item.name)
                 case .failure(let error):
-                    self.status = "\(item.name): \(error.localizedDescription)"
+                    let message = "\(item.name): \(error.localizedDescription)"
+                    self.status = message
+                    self.showTransferFailureAlert(message)
                 }
             }
         }
@@ -723,7 +898,9 @@ final class RemoteFileStore: ObservableObject {
                 case .success:
                     self.status = Self.localizedFormat("Downloaded %d items", itemsToDownload.count)
                 case .failure(let error):
-                    self.status = error.localizedDescription
+                    let message = error.localizedDescription
+                    self.status = message
+                    self.showTransferFailureAlert(message)
                 }
             }
         }
@@ -809,7 +986,9 @@ final class RemoteFileStore: ObservableObject {
                             ? Self.localizedFormat("Downloaded %@", items[0].name)
                             : Self.localizedFormat("Downloaded %d items", items.count)
                     case .failure(let error):
-                        store.status = error.localizedDescription
+                        let message = error.localizedDescription
+                        store.status = message
+                        store.showTransferFailureAlert(message)
                     }
                     AppDragRegistry.clearActiveRemoteFileDrag(token)
                 }
@@ -896,20 +1075,67 @@ final class RemoteFileStore: ObservableObject {
         }
     }
 
+    func copyToServer(_ item: RemoteFileItem, targetProfile: ServerProfile) {
+        let itemsToCopy = uniqueItems(actionItems(for: item))
+        guard !itemsToCopy.isEmpty else {
+            return
+        }
+
+        guard let passwordResult = SSHPasswordPrompter.passwordForConnection(profile: targetProfile) else {
+            return
+        }
+
+        guard let remoteDirectory = askRemoteDirectory(profile: targetProfile, password: passwordResult.password) else {
+            return
+        }
+
+        copyItemsToServer(
+            itemsToCopy,
+            targetProfile: targetProfile,
+            targetPassword: passwordResult.password,
+            remoteDirectory: remoteDirectory
+        )
+    }
+
     private func copyFromRemote(_ context: RemoteFileDragPayload, to remoteDirectory: String) {
         let itemsToCopy = uniqueItems(context.items)
         guard !itemsToCopy.isEmpty else {
             return
         }
 
+        copyItemsToServer(
+            itemsToCopy,
+            sourceProfile: context.profile,
+            sourcePassword: context.sessionPassword,
+            targetProfile: profile,
+            targetPassword: sessionPassword,
+            remoteDirectory: remoteDirectory,
+            reloadTargetDirectory: true
+        )
+    }
+
+    private func copyItemsToServer(
+        _ itemsToCopy: [RemoteFileItem],
+        sourceProfile: ServerProfile? = nil,
+        sourcePassword: String? = nil,
+        targetProfile: ServerProfile,
+        targetPassword: String?,
+        remoteDirectory: String,
+        reloadTargetDirectory: Bool = false
+    ) {
+        let sourceProfile = sourceProfile ?? profile
+        let sourcePassword = sourcePassword ?? sessionPassword
+        let remoteDirectory = Self.normalizedRemoteBrowserPath(remoteDirectory)
+
         uploadingPaths.insert(remoteDirectory)
+        transferPercent = nil
         status = itemsToCopy.count == 1
             ? Self.localizedFormat("Copying %@...", itemsToCopy[0].name)
             : Self.localizedFormat("Copying %d items...", itemsToCopy.count)
 
-        Task.detached { [profile, sessionPassword] in
+        Task.detached { [currentProfile = profile] in
             let result: Result<Void, RemoteFileError>
-            switch Self.loadDirectory(profile: profile, path: remoteDirectory, password: sessionPassword) {
+            switch Self.loadDirectory(profile: targetProfile, path: remoteDirectory, password: targetPassword) {
             case .success(let remoteItems):
                 let itemNames = itemsToCopy.map(\.name)
                 if let duplicateName = Self.firstDuplicateName(itemNames) {
@@ -917,14 +1143,28 @@ final class RemoteFileStore: ObservableObject {
                 } else if let existingName = itemNames.first(where: { name in remoteItems.contains { $0.name == name } }) {
                     result = .failure(RemoteFileError(message: Self.localizedFormat("An item named %@ already exists.", existingName)))
                 } else {
-                    result = Self.copyItemsThroughTemporaryDirectory(
+                    result = Self.copyItemsBetweenServers(
                         itemsToCopy,
-                        from: context.profile,
-                        sourcePassword: context.sessionPassword,
+                        from: sourceProfile,
+                        sourcePassword: sourcePassword,
                         to: remoteDirectory,
-                        targetProfile: profile,
-                        targetPassword: sessionPassword
-                    )
+                        targetProfile: targetProfile,
+                        targetPassword: targetPassword
+                    ) { progress in
+                        Task { @MainActor [weak self] in
+                            guard let self,
+                                  self.uploadingPaths.contains(remoteDirectory) else {
+                                return
+                            }
+
+                            self.transferPercent = Double(progress.percent) / 100
+                            self.status = Self.transferStatus(
+                                formatKey: "Copying %@...",
+                                multiItemFormatKey: "Copying %d/%d %@...",
+                                progress: progress
+                            )
+                        }
+                    }
                 }
             case .failure(let error):
                 result = .failure(error)
@@ -932,15 +1172,20 @@ final class RemoteFileStore: ObservableObject {
 
             await MainActor.run {
                 self.uploadingPaths.remove(remoteDirectory)
+                self.transferPercent = nil
 
                 switch result {
                 case .success:
                     self.status = itemsToCopy.count == 1
                         ? Self.localizedFormat("Copied %@", itemsToCopy[0].name)
                         : Self.localizedFormat("Copied %d items", itemsToCopy.count)
-                    self.reloadAfterUpload(to: remoteDirectory)
+                    if reloadTargetDirectory && targetProfile.id == currentProfile.id {
+                        self.reloadAfterUpload(to: remoteDirectory)
+                    }
                 case .failure(let error):
-                    self.status = error.localizedDescription
+                    let message = error.localizedDescription
+                    self.status = message
+                    self.showTransferFailureAlert(message)
                 }
             }
         }
@@ -1067,7 +1312,9 @@ final class RemoteFileStore: ObservableObject {
                         : Self.localizedFormat("Uploaded %d items", urls.count)
                     self.reloadAfterUpload(to: remoteDirectory)
                 case .failure(let error):
-                    self.status = "\(remoteDirectory): \(error.localizedDescription)"
+                    let message = "\(remoteDirectory): \(error.localizedDescription)"
+                    self.status = message
+                    self.showTransferFailureAlert(message)
                 }
             }
         }
@@ -1649,6 +1896,8 @@ final class RemoteFileStore: ObservableObject {
             || (message.contains("rsync") && message.contains("no such file or directory"))
             || message.contains("protocol version mismatch")
             || message.contains("incompatible rsync")
+            || (message.contains("rsync") && message.contains("permission denied"))
+            || message.contains("permission denied (13)")
     }
 
     private nonisolated static func rsyncRemoteSpec(profile: ServerProfile, path: String) -> String {
@@ -1677,13 +1926,38 @@ final class RemoteFileStore: ObservableObject {
         return runRemoteCommand(command, profile: profile, password: password, fallbackMessage: "Remote copy failed")
     }
 
+    private nonisolated static func copyItemsBetweenServers(
+        _ items: [RemoteFileItem],
+        from sourceProfile: ServerProfile,
+        sourcePassword: String?,
+        to remoteDirectory: String,
+        targetProfile: ServerProfile,
+        targetPassword: String?,
+        progress: (@Sendable (RemoteTransferProgress) -> Void)? = nil
+    ) -> Result<Void, RemoteFileError> {
+        if sourceProfile.id == targetProfile.id {
+            return copyItems(items, to: remoteDirectory, profile: sourceProfile, password: sourcePassword)
+        }
+
+        return copyItemsThroughTemporaryDirectory(
+            items,
+            from: sourceProfile,
+            sourcePassword: sourcePassword,
+            to: remoteDirectory,
+            targetProfile: targetProfile,
+            targetPassword: targetPassword,
+            progress: progress
+        )
+    }
+
     private nonisolated static func copyItemsThroughTemporaryDirectory(
         _ items: [RemoteFileItem],
         from sourceProfile: ServerProfile,
         sourcePassword: String?,
         to remoteDirectory: String,
         targetProfile: ServerProfile,
-        targetPassword: String?
+        targetPassword: String?,
+        progress: (@Sendable (RemoteTransferProgress) -> Void)? = nil
     ) -> Result<Void, RemoteFileError> {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("OrnithopterServerTransfers", isDirectory: true)
@@ -1699,12 +1973,12 @@ final class RemoteFileStore: ObservableObject {
             try? FileManager.default.removeItem(at: temporaryDirectory)
         }
 
-        switch downloadItems(items, toDirectory: temporaryDirectory, profile: sourceProfile, password: sourcePassword) {
+        switch downloadItems(items, toDirectory: temporaryDirectory, profile: sourceProfile, password: sourcePassword, progress: progress) {
         case .success:
             let localURLs = items.map { item in
                 temporaryDirectory.appendingPathComponent(item.name, isDirectory: item.isDirectory)
             }
-            return uploadItems(localURLs, to: remoteDirectory, profile: targetProfile, password: targetPassword)
+            return uploadItems(localURLs, to: remoteDirectory, profile: targetProfile, password: targetPassword, progress: progress)
         case .failure(let error):
             return .failure(error)
         }
@@ -1867,6 +2141,17 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func runRemoteCommand(_ command: String, profile: ServerProfile, password: String?, fallbackMessage: String) -> Result<Void, RemoteFileError> {
+        runRemoteCommandWithOutput(command, profile: profile, password: password, fallbackMessage: fallbackMessage)
+    }
+
+    private nonisolated static func runRemoteCommandWithOutput(
+        _ command: String,
+        profile: ServerProfile,
+        password: String?,
+        fallbackMessage: String,
+        overallTimeout: TimeInterval? = 20,
+        outputHandler: (@Sendable (String) -> Void)? = nil
+    ) -> Result<Void, RemoteFileError> {
         let askPassSession = SSHAskPassSession(password: password)
         defer {
             askPassSession?.stop()
@@ -1877,7 +2162,9 @@ final class RemoteFileStore: ObservableObject {
             arguments: SSHCommandBuilder.remoteCommandArguments(for: profile, command: command, allowPassword: password != nil),
             environment: remoteProcessEnvironment(askPassSession: askPassSession),
             input: nil,
-            timeoutMessage: localizedFormat("%@: timed out", fallbackMessage)
+            timeoutMessage: localizedFormat("%@: timed out", fallbackMessage),
+            overallTimeout: overallTimeout,
+            outputHandler: outputHandler
         )
 
         switch result {
@@ -2223,6 +2510,18 @@ final class RemoteFileStore: ObservableObject {
         return parts.dropLast().joined(separator: "/")
     }
 
+    private nonisolated static func normalizedRemoteBrowserPath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == "~" {
+            return "."
+        }
+        if trimmed.hasPrefix("~/") {
+            let relativePath = String(trimmed.dropFirst(2))
+            return relativePath.isEmpty ? "." : relativePath
+        }
+        return trimmed
+    }
+
     private nonisolated static func sftpListCommands(for path: String, decorated: Bool = true) -> String {
         let lsCommand = decorated ? "ls -la" : "ls -1 -a"
 
@@ -2305,6 +2604,213 @@ final class RemoteFileStore: ObservableObject {
         return panel.urls
     }
 
+    private func askRemoteDirectory(profile targetProfile: ServerProfile, password: String?) -> String? {
+        var path = Self.normalizedRemoteBrowserPath(targetProfile.remotePath)
+        var state = remoteFolderChooserState(profile: targetProfile, path: path, password: password)
+        let chooser = makeRemoteFolderChooser(
+            profileName: targetProfile.displayName,
+            path: path,
+            message: state.message,
+            folders: state.folders
+        )
+
+        while true {
+            chooser.controller.action = .cancel
+            NSApp.runModal(for: chooser.panel)
+
+            switch chooser.controller.action {
+            case .choose:
+                return path
+            case .open:
+                if let selectedPath = chooser.controller.selectedFolderPath {
+                    path = Self.normalizedRemoteBrowserPath(selectedPath)
+                    state = remoteFolderChooserState(profile: targetProfile, path: path, password: password)
+                    chooser.controller.update(path: path, message: state.message, folders: state.folders)
+                }
+            case .up:
+                path = Self.parentPath(path)
+                state = remoteFolderChooserState(profile: targetProfile, path: path, password: password)
+                chooser.controller.update(path: path, message: state.message, folders: state.folders)
+            case .refresh:
+                state = remoteFolderChooserState(profile: targetProfile, path: path, password: password)
+                chooser.controller.update(path: path, message: state.message, folders: state.folders)
+            case .newFolder:
+                guard let folderName = askRemoteNewFolderName(in: path, existingItems: state.items) else {
+                    continue
+                }
+
+                let newPath = Self.joined(path, folderName)
+                switch Self.makeDirectory(newPath, profile: targetProfile, password: password) {
+                case .success:
+                    path = newPath
+                    state = remoteFolderChooserState(profile: targetProfile, path: path, password: password)
+                    chooser.controller.update(path: path, message: state.message, folders: state.folders)
+                case .failure(let error):
+                    status = "\(folderName): \(error.localizedDescription)"
+                    chooser.controller.update(path: path, message: status, folders: state.folders)
+                }
+            case .cancel:
+                return nil
+            }
+        }
+    }
+
+    private func remoteFolderChooserState(
+        profile targetProfile: ServerProfile,
+        path: String,
+        password: String?
+    ) -> (items: [RemoteFileItem], folders: [RemoteFileItem], message: String) {
+        let itemsResult = Self.loadDirectory(profile: targetProfile, path: path, password: password)
+        switch itemsResult {
+        case .success(let loadedItems):
+            self.status = Self.localizedFormat("%@: %d items", path, visibleItems(loadedItems).count)
+            return (
+                items: loadedItems,
+                folders: loadedItems.filter(\.isDirectory),
+                message: Self.localizedFormat("Choose a destination folder on %@.", targetProfile.displayName)
+            )
+        case .failure(let error):
+            return (items: [], folders: [], message: "\(path): \(error.localizedDescription)")
+        }
+    }
+
+    private func makeRemoteFolderChooser(
+        profileName: String,
+        path: String,
+        message: String,
+        folders: [RemoteFileItem]
+    ) -> (panel: NSPanel, controller: RemoteFolderChooserController) {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = Self.localized("Choose Remote Folder")
+        panel.isReleasedWhenClosed = false
+        panel.level = .floating
+
+        let controller = RemoteFolderChooserController(folders: folders)
+        controller.panel = panel
+        panel.delegate = controller
+
+        let content = NSView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 560, height: 420))
+        content.autoresizingMask = [.width, .height]
+        panel.contentView = content
+
+        let titleLabel = NSTextField(labelWithString: profileName)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.frame = NSRect(x: 20, y: 380, width: 520, height: 18)
+        titleLabel.autoresizingMask = [.width, .minYMargin]
+        content.addSubview(titleLabel)
+
+        let messageLabel = NSTextField(labelWithString: message)
+        messageLabel.textColor = .secondaryLabelColor
+        messageLabel.lineBreakMode = .byTruncatingTail
+        messageLabel.frame = NSRect(x: 20, y: 356, width: 520, height: 18)
+        messageLabel.autoresizingMask = [.width, .minYMargin]
+        content.addSubview(messageLabel)
+        controller.messageLabel = messageLabel
+
+        let pathField = NSTextField(labelWithString: path)
+        pathField.lineBreakMode = .byTruncatingMiddle
+        pathField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        pathField.backgroundColor = .controlBackgroundColor
+        pathField.drawsBackground = true
+        pathField.isBezeled = true
+        pathField.frame = NSRect(x: 20, y: 324, width: 520, height: 24)
+        pathField.autoresizingMask = [.width, .minYMargin]
+        content.addSubview(pathField)
+        controller.pathField = pathField
+
+        let upButton = NSButton(title: Self.localized("Up"), target: controller, action: #selector(RemoteFolderChooserController.goUp))
+        upButton.frame = NSRect(x: 20, y: 290, width: 72, height: 28)
+        upButton.bezelStyle = .rounded
+        content.addSubview(upButton)
+
+        let refreshButton = NSButton(title: Self.localized("Refresh"), target: controller, action: #selector(RemoteFolderChooserController.refresh))
+        refreshButton.frame = NSRect(x: 100, y: 290, width: 88, height: 28)
+        refreshButton.bezelStyle = .rounded
+        content.addSubview(refreshButton)
+
+        let newFolderButton = NSButton(title: Self.localized("New Folder..."), target: controller, action: #selector(RemoteFolderChooserController.newFolder))
+        newFolderButton.frame = NSRect(x: 196, y: 290, width: 116, height: 28)
+        newFolderButton.bezelStyle = .rounded
+        content.addSubview(newFolderButton)
+
+        let scrollView = NSScrollView(frame: NSRect(x: 20, y: 70, width: 520, height: 214))
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        scrollView.autoresizingMask = [.width, .height]
+
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("Folder"))
+        column.title = Self.localized("Folder")
+        column.resizingMask = .autoresizingMask
+        controller.tableView.addTableColumn(column)
+        controller.tableView.headerView = nil
+        controller.tableView.rowHeight = 24
+        controller.tableView.usesAlternatingRowBackgroundColors = true
+        controller.tableView.delegate = controller
+        controller.tableView.dataSource = controller
+        controller.tableView.target = controller
+        controller.tableView.doubleAction = #selector(RemoteFolderChooserController.doubleClickRow)
+        scrollView.documentView = controller.tableView
+        content.addSubview(scrollView)
+
+        let emptyLabel = NSTextField(labelWithString: Self.localized("No folders"))
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.alignment = .center
+        emptyLabel.frame = NSRect(x: 20, y: 164, width: 520, height: 20)
+        emptyLabel.autoresizingMask = [.width, .minYMargin, .maxYMargin]
+        emptyLabel.isHidden = !folders.isEmpty
+        content.addSubview(emptyLabel)
+        controller.emptyLabel = emptyLabel
+
+        let cancelButton = NSButton(title: Self.localized("Cancel"), target: controller, action: #selector(RemoteFolderChooserController.cancel))
+        cancelButton.frame = NSRect(x: 340, y: 24, width: 88, height: 30)
+        cancelButton.bezelStyle = .rounded
+        cancelButton.autoresizingMask = [.minXMargin, .maxYMargin]
+        content.addSubview(cancelButton)
+
+        let chooseButton = NSButton(title: Self.localized("Choose This Folder"), target: controller, action: #selector(RemoteFolderChooserController.chooseFolder))
+        chooseButton.frame = NSRect(x: 436, y: 24, width: 104, height: 30)
+        chooseButton.bezelStyle = .rounded
+        chooseButton.keyEquivalent = "\r"
+        chooseButton.autoresizingMask = [.minXMargin, .maxYMargin]
+        content.addSubview(chooseButton)
+
+        return (panel, controller)
+    }
+
+    private func askRemoteNewFolderName(in path: String, existingItems: [RemoteFileItem]) -> String? {
+        let alert = NSAlert()
+        alert.messageText = Self.localized("New Folder...")
+        alert.informativeText = path
+        alert.addButton(withTitle: Self.localized("OK"))
+        alert.addButton(withTitle: Self.localized("Cancel"))
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = "Untitled Folder"
+        alert.accessoryView = field
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+
+        let validation = Self.validateRemoteName(field.stringValue)
+        guard validation.isValid, let name = validation.name else {
+            status = validation.message ?? Self.localized("Invalid folder name")
+            return nil
+        }
+
+        guard !existingItems.contains(where: { $0.name == name }) else {
+            status = Self.localizedFormat("An item named %@ already exists.", name)
+            return nil
+        }
+
+        return name
+    }
+
     private func confirmDelete(_ item: RemoteFileItem) -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -2362,16 +2868,19 @@ struct RemoteFolderBrowser: View {
     @StateObject private var store: RemoteFileStore
     @AppStorage("supportedTextFilePatterns") private var supportedTextFilePatterns = AppPreferenceDefaults.supportedTextFilePatterns
     @State private var isDropTarget = false
+    let availableProfiles: [ServerProfile]
     let collapseAction: () -> Void
     let editAction: (RemoteFileItem) -> Void
 
     init(
         profile: ServerProfile,
+        availableProfiles: [ServerProfile] = [],
         sessionPassword: String? = nil,
         collapseAction: @escaping () -> Void,
         editAction: @escaping (RemoteFileItem) -> Void = { _ in }
     ) {
         _store = StateObject(wrappedValue: RemoteFileStore(profile: profile, sessionPassword: sessionPassword))
+        self.availableProfiles = availableProfiles
         self.collapseAction = collapseAction
         self.editAction = editAction
     }
@@ -2413,6 +2922,7 @@ struct RemoteFolderBrowser: View {
                             item: item,
                             depth: 0,
                             store: store,
+                            availableProfiles: availableProfiles,
                             supportedTextFilePatterns: supportedTextFilePatterns,
                             editAction: editAction
                         )
@@ -2764,6 +3274,7 @@ private struct RemoteFileTreeRow: View {
     let item: RemoteFileItem
     let depth: Int
     @ObservedObject var store: RemoteFileStore
+    let availableProfiles: [ServerProfile]
     let supportedTextFilePatterns: String
     let editAction: (RemoteFileItem) -> Void
     @State private var isHovering = false
@@ -2936,6 +3447,21 @@ private struct RemoteFileTreeRow: View {
                     Label("Download...", systemImage: "arrow.down.circle")
                 }
 
+                let targetProfiles = store.serverTransferTargets(from: availableProfiles)
+                if !targetProfiles.isEmpty {
+                    Menu {
+                        ForEach(targetProfiles) { targetProfile in
+                            Button {
+                                store.copyToServer(item, targetProfile: targetProfile)
+                            } label: {
+                                Text(targetProfile.displayName)
+                            }
+                        }
+                    } label: {
+                        Label("Copy to Server...", systemImage: "server.rack")
+                    }
+                }
+
                 Button {
                     beginRename()
                 } label: {
@@ -2975,6 +3501,7 @@ private struct RemoteFileTreeRow: View {
                         item: child,
                         depth: depth + 1,
                         store: store,
+                        availableProfiles: availableProfiles,
                         supportedTextFilePatterns: supportedTextFilePatterns,
                         editAction: editAction
                     )
