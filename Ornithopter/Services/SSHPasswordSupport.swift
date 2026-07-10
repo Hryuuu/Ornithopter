@@ -6,6 +6,7 @@
 import AppKit
 import Darwin
 import Foundation
+import LocalAuthentication
 import Security
 
 extension Notification.Name {
@@ -22,21 +23,59 @@ struct SSHConnectionPasswordResult {
     let shouldEnableKeychainSaving: Bool
 }
 
+enum SSHPasswordMemoryCache {
+    private static let lock = NSLock()
+    private static var passwords: [ServerProfile.ID: String] = [:]
+
+    static func password(for profile: ServerProfile) -> String? {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+
+        return passwords[profile.id]
+    }
+
+    static func store(_ password: String, for profile: ServerProfile) {
+        lock.lock()
+        passwords[profile.id] = password
+        lock.unlock()
+    }
+
+    static func removePassword(for profile: ServerProfile) {
+        lock.lock()
+        passwords.removeValue(forKey: profile.id)
+        lock.unlock()
+    }
+
+    static func removeAllPasswords() {
+        lock.lock()
+        passwords.removeAll()
+        lock.unlock()
+    }
+}
+
 enum SSHPasswordKeychain {
     private static let service = "kucc.co.kr.Ornithopter.ssh-password"
     private static let accessible = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
 
     static func hasPassword(for profile: ServerProfile) -> Bool {
+        if SSHPasswordMemoryCache.password(for: profile) != nil {
+            return true
+        }
+
+        let context = LAContext()
+        context.interactionNotAllowed = true
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: profile.id.uuidString,
+            kSecUseAuthenticationContext as String: context,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
 
         let status = SecItemCopyMatching(query as CFDictionary, nil)
         if status == errSecSuccess {
-            migratePasswordAttributesIfNeeded(for: profile)
             return true
         }
         return false
@@ -59,7 +98,12 @@ enum SSHPasswordKeychain {
         }
 
         migratePasswordAttributesIfNeeded(for: profile)
-        return String(data: data, encoding: .utf8)
+        guard let password = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        SSHPasswordMemoryCache.store(password, for: profile)
+        return password
     }
 
     @discardableResult
@@ -78,6 +122,7 @@ enum SSHPasswordKeychain {
 
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecSuccess {
+            SSHPasswordMemoryCache.store(password, for: profile)
             notifyPasswordsChanged()
             return status
         }
@@ -94,6 +139,7 @@ enum SSHPasswordKeychain {
         if status == errSecItemNotFound {
             let addStatus = SecItemAdd(item as CFDictionary, nil)
             if addStatus == errSecSuccess {
+                SSHPasswordMemoryCache.store(password, for: profile)
                 notifyPasswordsChanged()
             }
             return addStatus
@@ -103,6 +149,8 @@ enum SSHPasswordKeychain {
     }
 
     static func deletePassword(for profile: ServerProfile) {
+        SSHPasswordMemoryCache.removePassword(for: profile)
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -117,6 +165,8 @@ enum SSHPasswordKeychain {
 
     @discardableResult
     static func deleteAllPasswords() -> OSStatus {
+        SSHPasswordMemoryCache.removeAllPasswords()
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service
@@ -153,10 +203,16 @@ enum SSHPasswordPrompter {
             return SSHConnectionPasswordResult(password: nil, shouldEnableKeychainSaving: false)
         }
 
-        if profile.savePasswordInKeychain,
-           let password = SSHPasswordKeychain.password(for: profile),
-           !password.isEmpty {
-            return SSHConnectionPasswordResult(password: password, shouldEnableKeychainSaving: false)
+        if profile.savePasswordInKeychain {
+            if let password = SSHPasswordMemoryCache.password(for: profile),
+               !password.isEmpty {
+                return SSHConnectionPasswordResult(password: password, shouldEnableKeychainSaving: false)
+            }
+
+            if let password = SSHPasswordKeychain.password(for: profile),
+               !password.isEmpty {
+                return SSHConnectionPasswordResult(password: password, shouldEnableKeychainSaving: false)
+            }
         }
 
         guard let result = requestPassword(

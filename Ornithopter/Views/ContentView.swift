@@ -258,6 +258,13 @@ private struct ServerDetailView: View {
     @State private var hasStoredKeychainPassword = false
     @State private var authenticationUsesPassword = true
 
+    private struct PasswordIdentity: Equatable {
+        let profileID: ServerProfile.ID
+        let host: String
+        let username: String
+        let port: Int
+    }
+
     private var canConnect: Bool {
         !profile.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !profile.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -274,6 +281,20 @@ private struct ServerDetailView: View {
             get: { !profile.disableExplorer },
             set: { profile.disableExplorer = !$0 }
         )
+    }
+
+    private var passwordIdentity: PasswordIdentity {
+        PasswordIdentity(
+            profileID: profile.id,
+            host: profile.host,
+            username: profile.username,
+            port: profile.port
+        )
+    }
+
+    private func discardSavedPassword() {
+        SSHPasswordKeychain.deletePassword(for: profile)
+        hasStoredKeychainPassword = false
     }
 
     var body: some View {
@@ -418,6 +439,9 @@ private struct ServerDetailView: View {
                         profile.savePasswordInKeychain = false
                     }
                 }
+                if !value {
+                    discardSavedPassword()
+                }
                 return
             }
 
@@ -426,6 +450,9 @@ private struct ServerDetailView: View {
                 DispatchQueue.main.async {
                     profile.savePasswordInKeychain = false
                 }
+            }
+            if !value {
+                discardSavedPassword()
             }
         }
         .onChange(of: authenticationUsesPassword) { _, value in
@@ -437,8 +464,18 @@ private struct ServerDetailView: View {
                 profile.passwordAuthentication = value
             }
         }
-        .onChange(of: profile.savePasswordInKeychain) { _, _ in
+        .onChange(of: profile.savePasswordInKeychain) { _, value in
+            if !value {
+                discardSavedPassword()
+            }
             refreshKeychainState()
+        }
+        .onChange(of: passwordIdentity) { oldValue, newValue in
+            guard oldValue.profileID == newValue.profileID else {
+                return
+            }
+
+            discardSavedPassword()
         }
         .onReceive(NotificationCenter.default.publisher(for: .ornithopterSavedSSHPasswordsDidChange)) { _ in
             refreshKeychainState()
