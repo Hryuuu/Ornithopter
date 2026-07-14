@@ -6,7 +6,7 @@ A simple, free SSH client for macOS with a lightweight terminal-focused workflow
 
 ## Install
 
-Installation instructions will be added with the first release.
+TBD
 
 ## Features
 
