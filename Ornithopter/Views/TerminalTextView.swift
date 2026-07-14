@@ -288,7 +288,11 @@ private final class TerminalRuntimeProcessDelegate: NSObject, LocalProcessTermin
 }
 
 final class OrnithopterTerminalView: LocalProcessTerminalView {
+    private static let clearScrollbackSequence: [UInt8] = [0x1b, 0x5b, 0x33, 0x4a]
+    private static let trackedCommandLengthLimit = 512
+
     private var isComposingMarkedText = false
+    private var trackedCommandText = ""
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         isComposingMarkedText = Self.plainText(from: string)?.isEmpty == false
@@ -296,16 +300,21 @@ final class OrnithopterTerminalView: LocalProcessTerminalView {
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
-        guard let text = Self.plainText(from: string),
+        let text = Self.plainText(from: string)
+        guard let text,
               shouldSendIMECommitAsText(text) else {
             isComposingMarkedText = false
             super.insertText(string, replacementRange: replacementRange)
+            if let text {
+                trackInsertedText(text)
+            }
             return
         }
 
         super.unmarkText()
         isComposingMarkedText = false
         send(txt: text)
+        trackInsertedText(text)
     }
 
     override func unmarkText() {
@@ -313,8 +322,76 @@ final class OrnithopterTerminalView: LocalProcessTerminalView {
         super.unmarkText()
     }
 
+    func trackCommandKeyDown(_ event: NSEvent) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard !flags.contains(.command),
+              !flags.contains(.option) else {
+            return
+        }
+
+        switch event.keyCode {
+        case 36, 76: // Return, keypad Enter
+            let shouldClearScrollback = isTrackedCommandClear()
+            trackedCommandText = ""
+            if shouldClearScrollback {
+                DispatchQueue.main.async { [weak self] in
+                    self?.clearLocalScrollback()
+                }
+            }
+        case 51: // Delete/Backspace
+            removeLastTrackedCharacter()
+        case 53: // Escape
+            trackedCommandText = ""
+        default:
+            break
+        }
+    }
+
     private func shouldSendIMECommitAsText(_ text: String) -> Bool {
         isComposingMarkedText && text.unicodeScalars.contains(where: Self.isHangulScalar)
+    }
+
+    private func trackInsertedText(_ text: String) {
+        for character in text {
+            switch character {
+            case "\r", "\n":
+                submitTrackedCommand(shouldClearScrollback: isTrackedCommandClear())
+            case "\u{08}", "\u{7f}":
+                removeLastTrackedCharacter()
+            default:
+                guard !character.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                    continue
+                }
+
+                trackedCommandText.append(character)
+                if trackedCommandText.count > Self.trackedCommandLengthLimit {
+                    trackedCommandText.removeFirst(trackedCommandText.count - Self.trackedCommandLengthLimit)
+                }
+            }
+        }
+    }
+
+    private func submitTrackedCommand(shouldClearScrollback: Bool) {
+        trackedCommandText = ""
+
+        if shouldClearScrollback {
+            clearLocalScrollback()
+        }
+    }
+
+    private func isTrackedCommandClear() -> Bool {
+        trackedCommandText.trimmingCharacters(in: .whitespaces) == "clear"
+    }
+
+    private func removeLastTrackedCharacter() {
+        if !trackedCommandText.isEmpty {
+            trackedCommandText.removeLast()
+        }
+    }
+
+    private func clearLocalScrollback() {
+        feed(byteArray: Self.clearScrollbackSequence[...])
+        changeScrollback(getTerminal().options.scrollback)
     }
 
     nonisolated private static func plainText(from value: Any) -> String? {
@@ -345,6 +422,8 @@ final class OrnithopterTerminalView: LocalProcessTerminalView {
 }
 
 struct TerminalTextView: NSViewRepresentable {
+    private static let scrollbackLineLimit = 20_000
+
     let profile: ServerProfile
     let sessionPassword: String?
     let runtime: TerminalSessionRuntime
@@ -410,6 +489,7 @@ struct TerminalTextView: NSViewRepresentable {
             onTitleChanged: onTitleChanged
         )
         terminalView.processDelegate = runtime.processDelegate
+        applyScrollingConfiguration(to: terminalView)
         terminalView.needsDisplay = true
         coordinator.startIfNeeded(terminalView, runtime: runtime)
     }
@@ -422,8 +502,17 @@ struct TerminalTextView: NSViewRepresentable {
         terminalView.caretColor = NSColor(calibratedRed: 0.65, green: 0.95, blue: 0.62, alpha: 1)
         terminalView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         terminalView.backspaceSendsControlH = false
+        applyScrollingConfiguration(to: terminalView)
         terminalView.getTerminal().registerOscHandler(code: 3008) { _ in }
         return terminalView
+    }
+
+    private func applyScrollingConfiguration(to terminalView: LocalProcessTerminalView) {
+        terminalView.scrollerStyle = .legacy
+
+        if terminalView.getTerminal().options.scrollback != Self.scrollbackLineLimit {
+            terminalView.changeScrollback(Self.scrollbackLineLimit)
+        }
     }
 
     final class Coordinator: NSObject {
@@ -460,6 +549,8 @@ struct TerminalTextView: NSViewRepresentable {
             }
 
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                self?.trackTerminalCommandInput(event)
+
                 guard let self,
                       self.sendControlShortcutIfNeeded(event) else {
                     return event
@@ -467,6 +558,16 @@ struct TerminalTextView: NSViewRepresentable {
 
                 return nil
             }
+        }
+
+        private func trackTerminalCommandInput(_ event: NSEvent) {
+            guard let terminalView,
+                  terminalView.window?.firstResponder === terminalView,
+                  let ornithopterTerminalView = terminalView as? OrnithopterTerminalView else {
+                return
+            }
+
+            ornithopterTerminalView.trackCommandKeyDown(event)
         }
 
         private func sendControlShortcutIfNeeded(_ event: NSEvent) -> Bool {
