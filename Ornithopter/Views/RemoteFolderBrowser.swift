@@ -2846,7 +2846,7 @@ final class RemoteFileStore: ObservableObject {
         alert.addButton(withTitle: Self.localized("Cancel"))
 
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        field.stringValue = "Untitled Folder"
+        field.stringValue = NSLocalizedString("Untitled Folder", comment: "Default name for a new remote folder")
         alert.accessoryView = field
 
         guard alert.runModal() == .alertFirstButtonReturn else {

@@ -234,7 +234,7 @@ struct RemoteFileOutlineView: NSViewRepresentable {
         private func configure(_ cell: FileCellView, node: Node) {
             let editing = editingNode === node
             if !editing || cell.textField !== editingField {
-                cell.textField?.stringValue = drafts[node.path] ?? node.item?.name ?? "Untitled Folder"
+                cell.textField?.stringValue = drafts[node.path] ?? node.item?.name ?? NSLocalizedString("Untitled Folder", comment: "Default name for a new remote folder")
             }
             cell.alphaValue = 1
             cell.textField?.isEditable = editing
@@ -319,7 +319,7 @@ struct RemoteFileOutlineView: NSViewRepresentable {
             editingNode = node
             guard let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? FileCellView,
                   let field = cell.textField else { editingNode = nil; return }
-            field.stringValue = drafts[node.path] ?? node.item?.name ?? "Untitled Folder"
+            field.stringValue = drafts[node.path] ?? node.item?.name ?? NSLocalizedString("Untitled Folder", comment: "Default name for a new remote folder")
             editingField = field
             field.isEditable = true
             field.isSelectable = true
@@ -336,7 +336,7 @@ struct RemoteFileOutlineView: NSViewRepresentable {
             editingField?.isSelectable = false
             if let node {
                 drafts.removeValue(forKey: node.path)
-                editingField?.stringValue = node.item?.name ?? "Untitled Folder"
+                editingField?.stringValue = node.item?.name ?? NSLocalizedString("Untitled Folder", comment: "Default name for a new remote folder")
             }
             editingField = nil
             if wasNew && store.newFolderParent == node?.newFolderParent { store.cancelNewFolder() }
