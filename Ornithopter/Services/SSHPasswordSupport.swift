@@ -8,6 +8,7 @@ import Darwin
 import Foundation
 import LocalAuthentication
 import Security
+import OSLog
 
 extension Notification.Name {
     static let ornithopterSavedSSHPasswordsDidChange = Notification.Name("Ornithopter.savedSSHPasswordsDidChange")
@@ -342,27 +343,93 @@ enum SSHProcessEnvironment {
     }
 }
 
+nonisolated enum SSHAuthenticationPrompt: Equatable {
+    case hostKey, password, confirmation, secret
+
+    static func classify(_ prompt: String, hint: String) -> Self {
+        if prompt.contains("Are you sure you want to continue connecting") {
+            return .hostKey
+        }
+        if hint == "confirm" { return .confirmation }
+        if prompt.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("password:") {
+            return .password
+        }
+        return .secret
+    }
+}
+
+@MainActor
+private enum SSHAuthenticationPrompter {
+    private static var acceptedHostPrompts: Set<String> = []
+    private static var pending: [() -> Void] = []
+    private static var presenting = false
+
+    static func enqueue(_ action: @escaping () -> Void) {
+        pending.append(action)
+        guard !presenting else { return }
+        presenting = true
+        while !pending.isEmpty { pending.removeFirst()() }
+        presenting = false
+    }
+
+    static func response(to prompt: String, hint: String, password: String?, session: SSHAskPassSession) -> String {
+        guard !session.isStopped else { return "no" }
+        let kind = SSHAuthenticationPrompt.classify(prompt, hint: hint)
+        if kind == .password, let password { return password }
+        if kind == .hostKey, acceptedHostPrompts.contains(prompt) { return "yes" }
+
+        let alert = NSAlert()
+        alert.informativeText = prompt
+        let isConfirmation = kind == .hostKey || kind == .confirmation
+        alert.messageText = NSLocalizedString(kind == .hostKey ? "Verify Server Identity" : "SSH Authentication", comment: "")
+        alert.alertStyle = isConfirmation ? .warning : .informational
+        alert.addButton(withTitle: NSLocalizedString(isConfirmation ? "Cancel" : "Continue", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString(kind == .hostKey ? "Trust and Connect" : (isConfirmation ? "Continue" : "Cancel"), comment: ""))
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        if !isConfirmation {
+            alert.accessoryView = field
+            alert.window.initialFirstResponder = field
+        }
+        session.setPromptAlert(alert)
+        defer { session.setPromptAlert(nil) }
+        let approved = alert.runModal() == (isConfirmation ? .alertSecondButtonReturn : .alertFirstButtonReturn) && !session.isStopped
+        guard approved else { return isConfirmation ? "no" : "" }
+        if kind == .hostKey { acceptedHostPrompts.insert(prompt) }
+        return isConfirmation ? "yes" : field.stringValue
+    }
+}
+
 nonisolated final class SSHAskPassSession: @unchecked Sendable {
+    private final class Reply: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: String?
+        func set(_ value: String) { lock.lock(); self.value = value; lock.unlock() }
+        func get() -> String? { lock.lock(); defer { lock.unlock() }; return value }
+    }
+    private static let logger = Logger(subsystem: "kucc.co.kr.Ornithopter", category: "SSHAskPass")
     private(set) var environment: [String: String] = [:]
 
-    private let password: String
+    private let password: String?
+    private let promptResponse: (@Sendable (String, String) -> String)?
     private let directoryURL: URL
     private let helperURL: URL
     private let fifoURL: URL
+    private let requestURL: URL
     private let queue: DispatchQueue
     private let lock = NSLock()
     private var stopped = false
+    @MainActor private weak var promptAlert: NSAlert?
 
-    init?(password: String?) {
-        guard let password, !password.isEmpty else {
-            return nil
-        }
+    @MainActor fileprivate func setPromptAlert(_ alert: NSAlert?) { promptAlert = alert }
 
+    init?(password: String?, promptResponse: (@Sendable (String, String) -> String)? = nil) {
         self.password = password
+        self.promptResponse = promptResponse
         directoryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("ornithopter-askpass-\(UUID().uuidString)", isDirectory: true)
         helperURL = directoryURL.appendingPathComponent("askpass.sh")
         fifoURL = directoryURL.appendingPathComponent("password.fifo")
+        requestURL = directoryURL.appendingPathComponent("request")
         queue = DispatchQueue(label: "kr.co.kucc.Ornithopter.askpass.\(UUID().uuidString)")
 
         do {
@@ -379,6 +446,10 @@ nonisolated final class SSHAskPassSession: @unchecked Sendable {
 
         let script = """
         #!/bin/sh
+        [ "${SSH_ASKPASS_PROMPT:-}" = none ] && exit 0
+        umask 077
+        printf '%s\\000%s\\000' "${SSH_ASKPASS_PROMPT:-}" "$1" > "$ORNITHOPTER_ASKPASS_REQUEST.tmp" || exit 1
+        /bin/mv "$ORNITHOPTER_ASKPASS_REQUEST.tmp" "$ORNITHOPTER_ASKPASS_REQUEST" || exit 1
         /bin/cat "$ORNITHOPTER_ASKPASS_FIFO"
         """
 
@@ -393,7 +464,8 @@ nonisolated final class SSHAskPassSession: @unchecked Sendable {
         environment = [
             "SSH_ASKPASS": helperURL.path,
             "SSH_ASKPASS_REQUIRE": "force",
-            "ORNITHOPTER_ASKPASS_FIFO": fifoURL.path
+            "ORNITHOPTER_ASKPASS_FIFO": fifoURL.path,
+            "ORNITHOPTER_ASKPASS_REQUEST": requestURL.path
         ]
         startWriter()
     }
@@ -411,44 +483,79 @@ nonisolated final class SSHAskPassSession: @unchecked Sendable {
         guard !wasStopped else {
             return
         }
+        DispatchQueue.main.async { [weak self] in
+            guard let alert = self?.promptAlert else { return }
+            if NSApp.modalWindow === alert.window { NSApp.abortModal() }
+            alert.window.orderOut(nil)
+        }
+        // Wake a helper already blocked opening/reading the FIFO when its SSH
+        // parent exits or the user closes the terminal during a prompt.
+        let fd = open(fifoURL.path, O_WRONLY | O_NONBLOCK)
+        if fd >= 0 {
+            try? ProcessPipeWriter.write(Data("no\n".utf8), to: fd, timeout: 0.1)
+            close(fd)
+        }
         cleanup()
     }
 
     private func startWriter() {
         let fifoPath = fifoURL.path
-        let output = Array((password + "\n").utf8)
+        let requestURL = requestURL
 
         queue.async { [weak self] in
             while self?.isStopped == false {
-                let fd = open(fifoPath, O_WRONLY | O_NONBLOCK)
-                if fd < 0 {
-                    if errno == ENXIO || errno == EINTR {
-                        usleep(50_000)
-                        continue
+                guard let data = try? Data(contentsOf: requestURL) else {
+                    usleep(50_000)
+                    continue
+                }
+                try? FileManager.default.removeItem(at: requestURL)
+                let fields = String(decoding: data, as: UTF8.self).split(separator: "\0", omittingEmptySubsequences: false)
+                guard fields.count == 3, fields.last == "" else { break }
+                let hint = String(fields[0])
+                let prompt = String(fields[1])
+                let reply = Reply()
+                if let provider = self?.promptResponse {
+                    reply.set(provider(prompt, hint))
+                } else if SSHAuthenticationPrompt.classify(prompt, hint: hint) == .password, let password = self?.password {
+                    reply.set(password)
+                } else {
+                    DispatchQueue.main.async { [weak self] in
+                        SSHAuthenticationPrompter.enqueue { [weak self] in
+                            guard let self else { reply.set("no"); return }
+                            reply.set(SSHAuthenticationPrompter.response(to: prompt, hint: hint, password: self.password, session: self))
+                        }
                     }
+                }
+                while reply.get() == nil && self?.isStopped == false { usleep(50_000) }
+                guard self?.isStopped == false, let response = reply.get() else { break }
+                let output = Data((response + "\n").utf8)
+                var fd: Int32 = -1
+                while self?.isStopped == false {
+                    fd = open(fifoPath, O_WRONLY | O_NONBLOCK)
+                    if fd >= 0 || (errno != ENXIO && errno != EINTR) { break }
+                    usleep(50_000)
+                }
+                if fd < 0 {
                     break
                 }
 
-                output.withUnsafeBufferPointer { buffer in
-                    guard let baseAddress = buffer.baseAddress else {
-                        return
+                do {
+                    // A cancelled authentication helper may close its FIFO before
+                    // this write. Suppress SIGPIPE on this descriptor only.
+                    if self?.isStopped == false {
+                        try ProcessPipeWriter.write(output, to: fd, timeout: 2)
                     }
-
-                    var written = 0
-                    while written < buffer.count {
-                        let count = write(fd, baseAddress.advanced(by: written), buffer.count - written)
-                        if count <= 0 {
-                            break
-                        }
-                        written += count
-                    }
+                } catch {
+                    Self.logger.error("Askpass pipe write failed: \((error as NSError).code)")
+                    close(fd)
+                    break
                 }
                 close(fd)
             }
         }
     }
 
-    private var isStopped: Bool {
+    fileprivate var isStopped: Bool {
         lock.lock()
         defer { lock.unlock() }
         return stopped

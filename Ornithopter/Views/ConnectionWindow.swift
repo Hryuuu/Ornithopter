@@ -252,6 +252,8 @@ struct ConnectionWindowView: View {
     @AppStorage("autoCloseTerminalTabOnNormalExit") private var autoCloseTerminalTabOnNormalExit = AppPreferenceDefaults.autoCloseTerminalTabOnNormalExit
     @StateObject private var profileStore = ProfileStore()
     @State private var isExplorerVisible = true
+    @AppStorage("fileExplorerWidth") private var explorerWidth = 240.0
+    @State private var resizingExplorerWidth: CGFloat?
     @State private var terminalLayout: TerminalLayout
     @State private var activePaneID: TerminalPane.ID?
     @State private var dropErrorMessage: String?
@@ -264,66 +266,72 @@ struct ConnectionWindowView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            if !profile.disableExplorer {
-                if isExplorerVisible {
+        GeometryReader { geometry in
+            let width = ExplorerWidth.clamped(resizingExplorerWidth ?? explorerWidth, availableWidth: geometry.size.width)
+            HStack(spacing: 0) {
+                if !profile.disableExplorer {
                     RemoteFolderBrowser(
                         profile: profile,
                         availableProfiles: profileStore.profiles,
                         sessionPassword: sessionPassword,
-                        collapseAction: {
-                            isExplorerVisible = false
-                        },
-                        editAction: { item in
-                            openRemoteItemInTerminal(item)
-                        }
+                        collapseAction: { isExplorerVisible = false },
+                        editAction: { item in openRemoteItemInTerminal(item) }
                     )
-                    .frame(width: 240)
-                } else {
-                    VStack {
-                        Button {
-                            isExplorerVisible = true
-                        } label: {
-                            Image(systemName: "sidebar.leading")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Show Files")
+                    .frame(width: width)
+                    .frame(width: isExplorerVisible ? width : 0, alignment: .leading)
+                    .clipped()
+                    .opacity(isExplorerVisible ? 1 : 0)
+                    .allowsHitTesting(isExplorerVisible)
+                    .accessibilityHidden(!isExplorerVisible)
 
-                        Spacer()
+                    if isExplorerVisible {
+                        ExplorerResizeDivider(width: width) { proposed in
+                            resizingExplorerWidth = ExplorerWidth.clamped(proposed, availableWidth: geometry.size.width)
+                        } onEnd: { proposed in
+                            explorerWidth = ExplorerWidth.clamped(proposed, availableWidth: geometry.size.width)
+                            resizingExplorerWidth = nil
+                        }
+                        .frame(width: ExplorerWidth.divider)
+                    } else {
+                        VStack {
+                            Button { isExplorerVisible = true } label: { Image(systemName: "sidebar.leading") }
+                                .buttonStyle(.borderless)
+                                .help("Show Files")
+                            Spacer()
+                        }
+                        .padding(.top, 8)
+                        .frame(width: 32)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        Divider()
                     }
-                    .padding(.top, 8)
-                    .frame(width: 32)
-                    .background(Color(nsColor: .controlBackgroundColor))
                 }
 
-                Divider()
-            }
-
-            TerminalLayoutView(
-                windowID: windowID,
-                profile: profile,
-                sessionPassword: sessionPassword,
-                layout: terminalLayout,
-                activePaneID: activePaneID,
-                dropErrorMessage: dropErrorMessage,
-                confirmReconnect: confirmReconnect,
-                actions: TerminalLayoutActions(
-                    activatePane: { activePaneID = $0 },
-                    addSession: addSession,
-                    closeSession: closeSession,
-                    selectSession: selectSession,
-                    splitPane: splitPane,
-                    moveSession: moveSession,
-                    detachSession: detachSession,
-                    insertSession: insertSession,
-                    updateSessionRunning: updateSessionRunning,
-                    scheduleNormalExitClose: scheduleNormalExitClose,
-                    reconnectSession: reconnectSession,
-                    updateSessionTitle: updateSessionTitle,
-                    showDropError: showDropError
+                TerminalLayoutView(
+                    windowID: windowID,
+                    profile: profile,
+                    sessionPassword: sessionPassword,
+                    layout: terminalLayout,
+                    activePaneID: activePaneID,
+                    dropErrorMessage: dropErrorMessage,
+                    confirmReconnect: confirmReconnect,
+                    actions: TerminalLayoutActions(
+                        activatePane: { activePaneID = $0 },
+                        addSession: addSession,
+                        closeSession: closeSession,
+                        selectSession: selectSession,
+                        splitPane: splitPane,
+                        moveSession: moveSession,
+                        detachSession: detachSession,
+                        insertSession: insertSession,
+                        updateSessionRunning: updateSessionRunning,
+                        scheduleNormalExitClose: scheduleNormalExitClose,
+                        reconnectSession: reconnectSession,
+                        updateSessionTitle: updateSessionTitle,
+                        showDropError: showDropError
+                    )
                 )
-            )
-            .frame(minWidth: 620)
+                .frame(minWidth: 620)
+            }
         }
         .frame(minWidth: 920, minHeight: 560)
         .onAppear {
@@ -385,7 +393,7 @@ struct ConnectionWindowView: View {
     }
 
     private func openRemoteItemInTerminal(_ item: RemoteFileItem) {
-        if item.isDirectory {
+        if item.isBrowsableDirectory {
             openRemoteFolderInTerminal(item)
             return
         }
@@ -1291,12 +1299,13 @@ private struct TerminalPaneView: View {
                                 SSHSessionWindowManager.scheduleNormalExitClose(session.id)
                             },
                             onUnexpectedExit: { status in
-                                DispatchQueue.main.async {
-                                    SSHSessionWindowManager.handleUnexpectedExit(session.id, status: status)
-                                }
+                                SSHSessionWindowManager.handleUnexpectedExit(session.id, status: status)
                             },
                             onTitleChanged: { title in
                                 SSHSessionWindowManager.updateTerminalSessionTitle(session.id, title: title)
+                            },
+                            onFocus: {
+                                actions.activatePane(pane.id)
                             }
                         )
                         .id(session.terminalID)

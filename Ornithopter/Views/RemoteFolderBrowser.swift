@@ -9,20 +9,7 @@ import Foundation
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
-
-struct RemoteFileItem: Identifiable, Hashable {
-    let name: String
-    let path: String
-    let isDirectory: Bool
-
-    var id: String {
-        path
-    }
-
-    var isHidden: Bool {
-        name.hasPrefix(".")
-    }
-}
+import OSLog
 
 private struct RemoteFileError: LocalizedError {
     let message: String
@@ -45,52 +32,6 @@ private nonisolated struct RemoteSubprocessResult {
     let outputText: String
     let errorText: String
     let terminationStatus: Int32
-}
-
-private nonisolated final class RemoteProcessOutputCollector: @unchecked Sendable {
-    private let lock = NSLock()
-    private let outputHandler: (@Sendable (String) -> Void)?
-    private var data = Data()
-
-    init(outputHandler: (@Sendable (String) -> Void)? = nil) {
-        self.outputHandler = outputHandler
-    }
-
-    func start(readingFrom fileHandle: FileHandle) {
-        fileHandle.readabilityHandler = { [weak self] handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else {
-                return
-            }
-
-            self?.append(chunk)
-        }
-    }
-
-    func stop(readingFrom fileHandle: FileHandle) {
-        fileHandle.readabilityHandler = nil
-    }
-
-    func finish(readingFrom fileHandle: FileHandle) -> String {
-        fileHandle.readabilityHandler = nil
-        append(fileHandle.readDataToEndOfFile())
-
-        lock.lock()
-        defer { lock.unlock() }
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    private func append(_ chunk: Data) {
-        guard !chunk.isEmpty else {
-            return
-        }
-
-        outputHandler?(String(decoding: chunk, as: UTF8.self))
-
-        lock.lock()
-        data.append(chunk)
-        lock.unlock()
-    }
 }
 
 private nonisolated struct RemoteTransferProgress: Sendable {
@@ -334,9 +275,10 @@ private final class RemoteFolderChooserController: NSObject, NSTableViewDataSour
 
 @MainActor
 final class RemoteFileStore: ObservableObject {
+    private nonisolated static let processLogger = Logger(subsystem: "kucc.co.kr.Ornithopter", category: "FileProcess")
     @Published private(set) var currentPath: String
-    @Published private(set) var items: [RemoteFileItem] = []
-    @Published private(set) var childrenByPath: [String: [RemoteFileItem]] = [:]
+    @Published private(set) var items: [RemoteFileItem] = [] { didSet { treeRevision &+= 1 } }
+    @Published private(set) var childrenByPath: [String: [RemoteFileItem]] = [:] { didSet { treeRevision &+= 1 } }
     @Published private(set) var expandedPaths: Set<String> = []
     @Published private(set) var loadingPaths: Set<String> = []
     @Published private(set) var downloadingPaths: Set<String> = []
@@ -344,7 +286,14 @@ final class RemoteFileStore: ObservableObject {
     @Published private(set) var movingPaths: Set<String> = []
     @Published private(set) var selectedPaths: Set<String> = []
     @Published private(set) var copiedItems: [RemoteFileItem] = []
-    @Published private(set) var newFolderParent: String?
+    @Published private(set) var newFolderParent: String? { didSet { treeRevision &+= 1 } }
+    private(set) var treeRevision = 0
+    private var listingRequests = RemoteListingRequests()
+    private var linkQueue: [RemoteFileItem] = []
+    private var pendingLinks: Set<String> = []
+    private var linksNeedingResolution: Set<String> = []
+    private var activeLinkProbes = 0
+    private var linkGeneration = UUID()
     @Published private(set) var status = NSLocalizedString("Not loaded", comment: "")
     @Published private(set) var transferPercent: Double?
 
@@ -352,6 +301,12 @@ final class RemoteFileStore: ObservableObject {
 
     private let profile: ServerProfile
     private let sessionPassword: String?
+    private let directoryLoader: (@Sendable (String) -> Result<[RemoteFileItem], Error>)?
+    private let linkProbe: (@Sendable (String) -> RemoteFileItem.LinkTarget)?
+
+    private var hasActiveFileOperation: Bool {
+        !downloadingPaths.isEmpty || !uploadingPaths.isEmpty || !movingPaths.isEmpty
+    }
 
     private nonisolated static func localized(_ key: String) -> String {
         NSLocalizedString(key, comment: "")
@@ -375,10 +330,12 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private func showTransferFailureAlert(_ message: String) {
+        if message.contains(Self.localized("Permission check cancelled. No files were changed.")) { return }
+        let isPermissionFailure = message.contains(Self.localized("Permission check failed. No files were changed."))
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = Self.localized("File Transfer Failed")
-        alert.informativeText = Self.localizedFormat("Reason: %@", Self.transferFailureReason(for: message)) + "\n\n" + message
+        alert.messageText = Self.localized(isPermissionFailure ? "Permission Denied" : "File Operation Failed")
+        alert.informativeText = isPermissionFailure ? message : Self.localizedFormat("Reason: %@", Self.transferFailureReason(for: message)) + "\n\n" + message
         alert.addButton(withTitle: Self.localized("OK"))
         alert.runModal()
     }
@@ -412,7 +369,11 @@ final class RemoteFileStore: ObservableObject {
         return localized("Transfer command failed")
     }
 
-    init(profile: ServerProfile, sessionPassword: String?) {
+    init(profile: ServerProfile, sessionPassword: String?,
+         directoryLoader: (@Sendable (String) -> Result<[RemoteFileItem], Error>)? = nil,
+         linkProbe: (@Sendable (String) -> RemoteFileItem.LinkTarget)? = nil) {
+        self.directoryLoader = directoryLoader
+        self.linkProbe = linkProbe
         self.profile = profile
         self.sessionPassword = sessionPassword
         self.currentPath = "."
@@ -428,38 +389,43 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private func reloadExpandedFolders() {
-        for path in expandedPaths.sorted() {
-            childrenByPath.removeValue(forKey: path)
-            loadChildren(path: path)
+        for path in expandedPaths.sorted() where path != currentPath {
+            loadChildren(path: path, force: true)
         }
     }
 
     private func load(path: String, updateCurrentPath: Bool, resetTree: Bool) {
         status = Self.localized("Loading...")
+        listingRequests.invalidateAll()
+        loadingPaths.removeAll()
+        let request = listingRequests.begin(path: path)
+        loadingPaths.insert(path)
+        linkGeneration = UUID()
+        linkQueue.removeAll()
+        pendingLinks.removeAll()
         if resetTree {
             expandedPaths.removeAll()
             childrenByPath.removeAll()
         }
 
-        Task.detached { [profile, sessionPassword] in
-            let result = Self.loadDirectory(profile: profile, path: path, password: sessionPassword)
+        Task.detached { [profile, sessionPassword, directoryLoader] in
+            let result = directoryLoader?(path).mapError { RemoteFileError(message: $0.localizedDescription) }
+                ?? Self.loadDirectory(profile: profile, path: path, password: sessionPassword)
 
             await MainActor.run {
+                guard self.listingRequests.finish(path: path, request: request) else { return }
+                self.loadingPaths.remove(path)
                 switch result {
                 case .success(let items):
                     if updateCurrentPath {
                         self.currentPath = path
                     }
-                    self.items = items
-                    self.childrenByPath[path] = items
+                    self.applyListing(items, at: path)
                     let visibleCount = self.visibleItems(items).count
                     self.status = visibleCount == 0
                         ? Self.localized("Empty folder")
                         : Self.localizedFormat("%d items", visibleCount)
                 case .failure(let error):
-                    if !updateCurrentPath {
-                        self.items = []
-                    }
                     self.status = "\(path): \(error.localizedDescription)"
                 }
             }
@@ -474,7 +440,7 @@ final class RemoteFileStore: ObservableObject {
     }
 
     func open(_ item: RemoteFileItem) {
-        guard item.isDirectory else {
+        guard item.isBrowsableDirectory else {
             return
         }
 
@@ -560,7 +526,7 @@ final class RemoteFileStore: ObservableObject {
     }
 
     func uploadTarget(for item: RemoteFileItem) -> String {
-        item.isDirectory ? item.path : Self.parentPath(item.path)
+        item.isBrowsableDirectory ? item.path : Self.parentPath(item.path)
     }
 
     func select(_ item: RemoteFileItem, extending: Bool) {
@@ -573,6 +539,84 @@ final class RemoteFileStore: ObservableObject {
         } else {
             selectedPaths.removeAll()
             selectedPaths.insert(item.path)
+        }
+    }
+
+    func setSelection(_ paths: Set<String>) {
+        if selectedPaths != paths { selectedPaths = paths }
+    }
+
+    func resolveVisibleLink(_ item: RemoteFileItem) {
+        let parent = Self.parentPath(item.path)
+        let current = (childrenByPath[parent] ?? items).first { $0.path == item.path }
+        guard let current, current.kind == .symbolicLink,
+              current.linkTarget == .unresolved || linksNeedingResolution.contains(current.path),
+              pendingLinks.insert(current.path).inserted else { return }
+        linkQueue.append(current)
+        startLinkProbes()
+    }
+
+    private func applyListing(_ incoming: [RemoteFileItem], at path: String) {
+        let previous = childrenByPath[path] ?? (path == currentPath ? items : [])
+        let previousByPath = Dictionary(previous.map { ($0.path, $0) }, uniquingKeysWith: { _, latest in latest })
+        let possibleDirectories = Set(incoming.filter { $0.isDirectory || $0.kind == .symbolicLink }.map(\.path))
+        for removed in previous where (removed.isDirectory || removed.kind == .symbolicLink) && !possibleDirectories.contains(removed.path) {
+            let isRemoved: (String) -> Bool = { $0 == removed.path || $0.hasPrefix(removed.path + "/") }
+            listingRequests.invalidateSubtree(removed.path)
+            childrenByPath = childrenByPath.filter { !isRemoved($0.key) }
+            expandedPaths = expandedPaths.filter { !isRemoved($0) }
+            loadingPaths = loadingPaths.filter { !isRemoved($0) }
+            linksNeedingResolution = linksNeedingResolution.filter { !isRemoved($0) }
+        }
+        let published = incoming.map { item -> RemoteFileItem in
+            guard item.kind == .symbolicLink else { return item }
+            linksNeedingResolution.insert(item.path)
+            var value = item
+            if let old = previousByPath[item.path], old.kind == .symbolicLink {
+                // Keep the existing presentation while the refreshed target is
+                // checked, avoiding a collapse/selection loss on every refresh.
+                value.linkTarget = old.linkTarget
+            }
+            return value
+        }
+        if path == currentPath { items = published }
+        childrenByPath[path] = published
+    }
+
+    private func startLinkProbes() {
+        while activeLinkProbes < 2, !linkQueue.isEmpty {
+            let item = linkQueue.removeFirst()
+            let generation = linkGeneration
+            let parent = Self.parentPath(item.path)
+            let version = listingRequests.version(path: parent)
+            activeLinkProbes += 1
+            Task.detached { [profile, sessionPassword, linkProbe] in
+                let target = linkProbe?(item.path) ?? Self.probeDirectoryLink(item.path, profile: profile, password: sessionPassword)
+                await MainActor.run {
+                    self.activeLinkProbes -= 1
+                    defer { self.startLinkProbes() }
+                    guard generation == self.linkGeneration else { return }
+                    self.pendingLinks.remove(item.path)
+                    guard version == self.listingRequests.version(path: parent) else { return }
+                    self.linksNeedingResolution.remove(item.path)
+                    var resolved = item
+                    resolved.linkTarget = target
+                    if let index = self.items.firstIndex(of: item) { self.items[index] = resolved }
+                    if let index = self.childrenByPath[parent]?.firstIndex(of: item) {
+                        self.childrenByPath[parent]?[index] = resolved
+                    }
+                }
+            }
+        }
+    }
+
+    private nonisolated static func probeDirectoryLink(_ path: String, profile: ServerProfile, password: String?) -> RemoteFileItem.LinkTarget {
+        switch runSFTPProcess(input: "cd \(sftpQuoted(path))\nquit\n", profile: profile, password: password, timeoutMessage: localized("SFTP timed out")) {
+        case .success(let result):
+            if result.terminationStatus == 0 { return .directory }
+            if result.errorText.lowercased().contains("not a directory") { return .nonDirectory }
+            return .unavailable
+        case .failure: return .unavailable
         }
     }
 
@@ -759,6 +803,7 @@ final class RemoteFileStore: ObservableObject {
     }
 
     func delete(_ items: [RemoteFileItem]) {
+        guard !hasActiveFileOperation else { return }
         let itemsToDelete = uniqueItems(items)
         guard !itemsToDelete.isEmpty, confirmDelete(itemsToDelete) else {
             return
@@ -767,9 +812,7 @@ final class RemoteFileStore: ObservableObject {
         for item in itemsToDelete {
             movingPaths.insert(item.path)
         }
-        status = itemsToDelete.count == 1
-            ? Self.localizedFormat("Deleting %@...", itemsToDelete[0].name)
-            : Self.localizedFormat("Deleting %d items...", itemsToDelete.count)
+        status = Self.localized("Checking permissions...")
 
         Task.detached { [profile, sessionPassword] in
             let result = Self.deleteItems(itemsToDelete, profile: profile, password: sessionPassword)
@@ -792,6 +835,8 @@ final class RemoteFileStore: ObservableObject {
                     self.reloadParents(of: itemsToDelete)
                 case .failure(let error):
                     self.status = error.localizedDescription
+                    self.reloadParents(of: itemsToDelete)
+                    self.showTransferFailureAlert(error.localizedDescription)
                 }
             }
         }
@@ -808,13 +853,14 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private func downloadSingle(_ item: RemoteFileItem) {
+        guard !hasActiveFileOperation else { return }
         guard let destination = askDownloadDestination(for: item) else {
             return
         }
 
         downloadingPaths.insert(item.path)
         transferPercent = nil
-        status = Self.localizedFormat("Downloading %@...", item.name)
+        status = Self.localized("Checking permissions...")
 
         Task.detached { [profile, sessionPassword] in
             let result = Self.downloadItem(
@@ -854,6 +900,7 @@ final class RemoteFileStore: ObservableObject {
     }
 
     func download(_ items: [RemoteFileItem]) {
+        guard !hasActiveFileOperation else { return }
         let itemsToDownload = uniqueItems(items)
         guard !itemsToDownload.isEmpty,
               let destination = askDownloadDirectory() else {
@@ -864,7 +911,7 @@ final class RemoteFileStore: ObservableObject {
             downloadingPaths.insert(item.path)
         }
         transferPercent = nil
-        status = Self.localizedFormat("Downloading %d items...", itemsToDownload.count)
+        status = Self.localized("Checking permissions...")
 
         Task.detached { [profile, sessionPassword] in
             let result = Self.downloadItems(
@@ -906,8 +953,19 @@ final class RemoteFileStore: ObservableObject {
         }
     }
 
+    func makeFilePromise(for item: RemoteFileItem) -> RemoteFilePromiseProvider? {
+        guard !hasActiveFileOperation else { return nil }
+        let items = dragItems(for: item)
+        let provider = dragItemProvider(for: item)
+        guard let token = AppDragRegistry.activeRemoteFilePayload?.token else { return nil }
+        return RemoteFilePromiseProvider(provider: provider, token: token,
+                                         name: items.count > 1 ? "Ornithopter Selection" : item.name,
+                                         typeIdentifier: Self.dragTypeIdentifier(for: items, draggedItem: item))
+    }
+
     func dragItemProvider(for item: RemoteFileItem) -> NSItemProvider {
         let provider = NSItemProvider()
+        guard !hasActiveFileOperation else { return provider }
         let items = dragItems(for: item)
         provider.suggestedName = Self.dragSuggestedName(for: items, draggedItem: item)
         let token = AppDragRegistry.beginRemoteFileDrag(
@@ -1010,6 +1068,17 @@ final class RemoteFileStore: ObservableObject {
 
     func uploadDroppedURLs(_ urls: [URL], to remoteDirectory: String) {
         upload(urls, to: remoteDirectory)
+    }
+
+    func remoteDragOperation(token: UUID) -> NSDragOperation {
+        guard let payload = AppDragRegistry.remoteFilePayload(for: token) else { return [] }
+        return payload.profile.id == profile.id ? .move : .copy
+    }
+
+    func handleRemoteFileDrop(token: UUID, to remoteDirectory: String) -> Bool {
+        guard let payload = AppDragRegistry.remoteFilePayload(for: token) else { return false }
+        handleRemoteFileDrop(token: token, payload: payload, to: remoteDirectory)
+        return true
     }
 
     func handleActiveRemoteFileDrop(to remoteDirectory: String) -> Bool {
@@ -1123,6 +1192,7 @@ final class RemoteFileStore: ObservableObject {
         remoteDirectory: String,
         reloadTargetDirectory: Bool = false
     ) {
+        guard !hasActiveFileOperation, !itemsToCopy.isEmpty else { return }
         let sourceProfile = sourceProfile ?? profile
         let sourcePassword = sourcePassword ?? sessionPassword
         let remoteDirectory = Self.normalizedRemoteBrowserPath(remoteDirectory)
@@ -1185,6 +1255,9 @@ final class RemoteFileStore: ObservableObject {
                 case .failure(let error):
                     let message = error.localizedDescription
                     self.status = message
+                    if reloadTargetDirectory && targetProfile.id == currentProfile.id {
+                        self.reloadAfterUpload(to: remoteDirectory)
+                    }
                     self.showTransferFailureAlert(message)
                 }
             }
@@ -1196,6 +1269,7 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private func move(_ items: [RemoteFileItem], to remoteDirectory: String) {
+        guard !hasActiveFileOperation else { return }
         let itemsToMove = uniqueItems(items)
         let destinationDirectory = remoteDirectory
         guard !itemsToMove.isEmpty else {
@@ -1253,12 +1327,16 @@ final class RemoteFileStore: ObservableObject {
                     }
                 case .failure(let error):
                     self.status = error.localizedDescription
+                    self.reloadParents(of: itemsToMove)
+                    self.reloadAfterUpload(to: destinationDirectory)
+                    self.showTransferFailureAlert(error.localizedDescription)
                 }
             }
         }
     }
 
     private func upload(_ urls: [URL], to remoteDirectory: String) {
+        guard !hasActiveFileOperation else { return }
         if let message = Self.validateUploadSources(urls).message {
             status = message
             return
@@ -1266,9 +1344,7 @@ final class RemoteFileStore: ObservableObject {
 
         uploadingPaths.insert(remoteDirectory)
         transferPercent = nil
-        status = urls.count == 1
-            ? Self.localizedFormat("Uploading %@...", urls[0].lastPathComponent)
-            : Self.localizedFormat("Uploading %d items...", urls.count)
+        status = Self.localized("Checking permissions...")
 
         Task.detached { [profile, sessionPassword] in
             let result: Result<Void, RemoteFileError>
@@ -1314,6 +1390,7 @@ final class RemoteFileStore: ObservableObject {
                 case .failure(let error):
                     let message = "\(remoteDirectory): \(error.localizedDescription)"
                     self.status = message
+                    self.reloadAfterUpload(to: remoteDirectory)
                     self.showTransferFailureAlert(message)
                 }
             }
@@ -1346,8 +1423,7 @@ final class RemoteFileStore: ObservableObject {
         if remoteDirectory == currentPath {
             refresh()
         } else if expandedPaths.contains(remoteDirectory) {
-            childrenByPath.removeValue(forKey: remoteDirectory)
-            loadChildren(path: remoteDirectory)
+            loadChildren(path: remoteDirectory, force: true)
         }
     }
 
@@ -1356,8 +1432,7 @@ final class RemoteFileStore: ObservableObject {
         if parent == currentPath {
             refresh()
         } else if expandedPaths.contains(parent) {
-            childrenByPath.removeValue(forKey: parent)
-            loadChildren(path: parent)
+            loadChildren(path: parent, force: true)
         } else {
             refresh()
         }
@@ -1373,8 +1448,7 @@ final class RemoteFileStore: ObservableObject {
         var didReloadExpandedParent = false
         for parent in parents where expandedPaths.contains(parent) {
             didReloadExpandedParent = true
-            childrenByPath.removeValue(forKey: parent)
-            loadChildren(path: parent)
+            loadChildren(path: parent, force: true)
         }
 
         if !didReloadExpandedParent {
@@ -1402,25 +1476,29 @@ final class RemoteFileStore: ObservableObject {
         return uniqueItems(result)
     }
 
-    private func loadChildren(path: String) {
+    private func loadChildren(path: String, force: Bool = false) {
+        guard force || !loadingPaths.contains(path) else { return }
+        let request = listingRequests.begin(path: path)
         loadingPaths.insert(path)
         status = Self.localizedFormat("Loading %@...", path)
 
-        Task.detached { [profile, sessionPassword] in
-            let result = Self.loadDirectory(profile: profile, path: path, password: sessionPassword)
+        Task.detached { [profile, sessionPassword, directoryLoader] in
+            let result = directoryLoader?(path).mapError { RemoteFileError(message: $0.localizedDescription) }
+                ?? Self.loadDirectory(profile: profile, path: path, password: sessionPassword)
 
             await MainActor.run {
+                guard self.listingRequests.finish(path: path, request: request) else { return }
                 self.loadingPaths.remove(path)
 
                 switch result {
                 case .success(let items):
-                    self.childrenByPath[path] = items
+                    self.applyListing(items, at: path)
                     let visibleCount = self.visibleItems(items).count
                     self.status = visibleCount == 0
                         ? Self.localizedFormat("%@: Empty folder", path)
                         : Self.localizedFormat("%@: %d items", path, visibleCount)
                 case .failure(let error):
-                    self.expandedPaths.remove(path)
+                    if self.childrenByPath[path] == nil { self.expandedPaths.remove(path) }
                     self.status = "\(path): \(error.localizedDescription)"
                 }
             }
@@ -1438,9 +1516,13 @@ final class RemoteFileStore: ObservableObject {
         switch result {
         case .success(let subprocessResult):
             if subprocessResult.terminationStatus == 0 {
-                return .success(parseListing(subprocessResult.outputText, basePath: path))
+                do {
+                    return .success(try RemoteDirectoryListing.parse(subprocessResult.outputText, basePath: path))
+                } catch {
+                    return .failure(RemoteFileError(message: error.localizedDescription))
+                }
             } else {
-                return loadDirectoryPlain(profile: profile, path: path, password: password)
+                return .failure(RemoteFileError(message: subprocessResult.errorText.isEmpty ? localized("SFTP list failed") : subprocessResult.errorText))
             }
         case .failure(let error):
             return .failure(error)
@@ -1459,6 +1541,11 @@ final class RemoteFileStore: ObservableObject {
             if didAccess {
                 destination.stopAccessingSecurityScopedResource()
             }
+        }
+
+        if case .failure(let error) = checkDownloadDestinations([item], destinations: [destination], profile: profile, password: password) { return .failure(error) }
+        if case .failure(let error) = checkRemotePermissions([.init(path: item.path, access: .read)], profile: profile, password: password) {
+            return .failure(error)
         }
 
         if isRsyncAvailable {
@@ -1527,6 +1614,11 @@ final class RemoteFileStore: ObservableObject {
             }
         }
 
+        if case .failure(let error) = checkDownloadDestinations(items, destinations: items.map { destination.appendingPathComponent($0.name) }, profile: profile, password: password) { return .failure(error) }
+        if case .failure(let error) = checkRemotePermissions(items.map { .init(path: $0.path, access: .read) }, profile: profile, password: password) {
+            return .failure(error)
+        }
+
         if isRsyncAvailable {
             let transferUnitCounts = items.map { remoteTransferUnitCount(for: $0, profile: profile, password: password) }
             let totalTransferUnitCount = transferUnitCounts.reduce(0, +)
@@ -1556,7 +1648,7 @@ final class RemoteFileStore: ObservableObject {
                         password: password
                     )
                 case .failure(let error):
-                    return .failure(error)
+                    return .failure(partialOperationError(error, names: items.map(\.name), failedIndex: index))
                 }
             }
 
@@ -1567,13 +1659,11 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func downloadItemsWithSFTP(_ items: [RemoteFileItem], toDirectory destination: URL, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
-        let commands = items.map { item in
+        performItems(items, names: items.map(\.name)) { item in
             let option = item.isDirectory ? "-R " : ""
-            return "get \(option)\(sftpQuoted(item.path)) \(sftpQuoted(destination.path))"
+            let command = "get \(option)\(sftpQuoted(item.path)) \(sftpQuoted(destination.path))"
+            return runSFTPCommands(command, profile: profile, password: password, fallbackMessage: "SFTP download failed")
         }
-        .joined(separator: "\n")
-
-        return runSFTPCommands(commands, profile: profile, password: password, fallbackMessage: "SFTP download failed")
     }
 
     private nonisolated static func downloadDragItems(
@@ -1612,6 +1702,13 @@ final class RemoteFileStore: ObservableObject {
             scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         }
 
+        let localIssues = FilePermissionPreflight.localReadIssues(urls)
+        if !localIssues.isEmpty { return .failure(RemoteFileError(message: FilePermissionPreflight.message(localIssues))) }
+        let requests: [FilePermissionPreflight.Request] = [.init(path: remoteDirectory, access: .directory)] + urls.map { .init(path: joined(remoteDirectory, $0.lastPathComponent), access: .write) }
+        if case .failure(let error) = checkRemotePermissions(requests, profile: profile, password: password) {
+            return .failure(error)
+        }
+
         if isRsyncAvailable {
             let transferUnitCounts = urls.map { transferUnitCount(for: $0) }
             let totalTransferUnitCount = transferUnitCounts.reduce(0, +)
@@ -1641,7 +1738,7 @@ final class RemoteFileStore: ObservableObject {
                         password: password
                     )
                 case .failure(let error):
-                    return .failure(error)
+                    return .failure(partialOperationError(error, names: urls.map(\.lastPathComponent), failedIndex: index))
                 }
             }
 
@@ -1652,14 +1749,12 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func uploadItemsWithSFTP(_ urls: [URL], to remoteDirectory: String, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
-        let commands = urls.map { url in
+        performItems(urls, names: urls.map(\.lastPathComponent)) { url in
             let remoteTarget = joined(remoteDirectory, url.lastPathComponent)
             let option = isDirectory(url) ? "-R " : ""
-            return "put \(option)\(sftpQuoted(url.path)) \(sftpQuoted(remoteTarget))"
+            let command = "put \(option)\(sftpQuoted(url.path)) \(sftpQuoted(remoteTarget))"
+            return runSFTPCommands(command, profile: profile, password: password, fallbackMessage: "SFTP upload failed")
         }
-        .joined(separator: "\n")
-
-        return runSFTPCommands(commands, profile: profile, password: password, fallbackMessage: "SFTP upload failed")
     }
 
     private nonisolated static func remoteTransferUnitCount(for item: RemoteFileItem, profile: ServerProfile, password: String?) -> Int {
@@ -1896,8 +1991,6 @@ final class RemoteFileStore: ObservableObject {
             || (message.contains("rsync") && message.contains("no such file or directory"))
             || message.contains("protocol version mismatch")
             || message.contains("incompatible rsync")
-            || (message.contains("rsync") && message.contains("permission denied"))
-            || message.contains("permission denied (13)")
     }
 
     private nonisolated static func rsyncRemoteSpec(profile: ServerProfile, path: String) -> String {
@@ -1921,9 +2014,14 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func copyItems(_ items: [RemoteFileItem], to remoteDirectory: String, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
-        let sources = items.map { shellQuoted($0.path) }.joined(separator: " ")
-        let command = "cp -R -- \(sources) \(shellQuoted(remoteDirectory))"
-        return runRemoteCommand(command, profile: profile, password: password, fallbackMessage: "Remote copy failed")
+        let requests: [FilePermissionPreflight.Request] = items.map { .init(path: $0.path, access: .read) }
+            + [.init(path: remoteDirectory, access: .directory)]
+            + items.map { .init(path: joined(remoteDirectory, $0.name), access: .write) }
+        if case .failure(let error) = checkRemotePermissions(requests, profile: profile, password: password) { return .failure(error) }
+        return performItems(items, names: items.map(\.name)) { item in
+            let command = "cp -R -- \(shellQuoted(item.path)) \(shellQuoted(remoteDirectory))"
+            return runRemoteCommand(command, profile: profile, password: password, fallbackMessage: "Remote copy failed")
+        }
     }
 
     private nonisolated static func copyItemsBetweenServers(
@@ -1959,6 +2057,9 @@ final class RemoteFileStore: ObservableObject {
         targetPassword: String?,
         progress: (@Sendable (RemoteTransferProgress) -> Void)? = nil
     ) -> Result<Void, RemoteFileError> {
+        let requests: [FilePermissionPreflight.Request] = [.init(path: remoteDirectory, access: .directory)] + items.map { .init(path: joined(remoteDirectory, $0.name), access: .write) }
+        if case .failure(let error) = checkRemotePermissions(requests, profile: targetProfile, password: targetPassword) { return .failure(error) }
+        if case .failure(let error) = checkRemotePermissions(items.map { .init(path: $0.path, access: .read) }, profile: sourceProfile, password: sourcePassword) { return .failure(error) }
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("OrnithopterServerTransfers", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -2052,13 +2153,12 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func renameItems(_ items: [RemoteFileItem], to remoteDirectory: String, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
-        let commands = items.map { item in
+        let requests: [FilePermissionPreflight.Request] = items.map { .init(path: $0.path, access: .move) } + [.init(path: remoteDirectory, access: .directory)]
+        if case .failure(let error) = checkRemotePermissions(requests, profile: profile, password: password) { return .failure(error) }
+        return performItems(items, names: items.map(\.name)) { item in
             let newPath = joined(remoteDirectory, item.name)
-            return "rename \(sftpQuoted(item.path)) \(sftpQuoted(newPath))"
+            return runSFTPCommands("rename \(sftpQuoted(item.path)) \(sftpQuoted(newPath))", profile: profile, password: password, fallbackMessage: "SFTP move failed")
         }
-        .joined(separator: "\n")
-
-        return runSFTPCommands(commands, profile: profile, password: password, fallbackMessage: "SFTP move failed")
     }
 
     private nonisolated static func deleteItem(_ item: RemoteFileItem, profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
@@ -2075,22 +2175,89 @@ final class RemoteFileStore: ObservableObject {
     }
 
     private nonisolated static func deleteItems(_ items: [RemoteFileItem], profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
-        var commands: [String] = []
+        if case .failure(let error) = checkRemotePermissions(items.map { .init(path: $0.path, access: .delete) }, profile: profile, password: password) {
+            return .failure(error)
+        }
+        return performItems(items, names: items.map(\.name)) { item in
+            deleteItem(item, profile: profile, password: password)
+        }
+    }
 
-        for item in items {
-            if item.isDirectory {
-                switch recursiveDeleteCommands(for: item.path, profile: profile, password: password) {
-                case .success(let childCommands):
-                    commands.append(contentsOf: childCommands)
-                case .failure(let error):
-                    return .failure(error)
-                }
-            } else {
-                commands.append("rm \(sftpQuoted(item.path))")
+    private nonisolated static func performItems<Item>(_ items: [Item], names: [String], operation: (Item) -> Result<Void, RemoteFileError>) -> Result<Void, RemoteFileError> {
+        for (index, item) in items.enumerated() {
+            if case .failure(let error) = operation(item) {
+                return .failure(partialOperationError(error, names: names, failedIndex: index))
             }
         }
+        return .success(())
+    }
 
-        return runSFTPCommands(commands.joined(separator: "\n"), profile: profile, password: password, fallbackMessage: "SFTP delete failed")
+    private nonisolated static func checkDownloadDestinations(_ items: [RemoteFileItem], destinations: [URL], profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
+        var issues = FilePermissionPreflight.localWriteIssues(destinations)
+        var pending = Array(zip(items, destinations))
+        while let (item, destination) = pending.popLast() {
+            guard item.isDirectory, FileManager.default.fileExists(atPath: destination.path) else { continue }
+            switch loadDirectory(profile: profile, path: item.path, password: password) {
+            case .failure(let error): return .failure(error)
+            case .success(let children):
+                let targets = children.map { destination.appendingPathComponent($0.name) }
+                issues.append(contentsOf: FilePermissionPreflight.localWriteIssues(targets))
+                pending.append(contentsOf: zip(children, targets))
+            }
+        }
+        return issues.isEmpty ? .success(()) : .failure(RemoteFileError(message: FilePermissionPreflight.message(issues)))
+    }
+
+    private nonisolated static func partialOperationError(_ error: RemoteFileError, names: [String], failedIndex: Int) -> RemoteFileError {
+        let completed = names.prefix(failedIndex).joined(separator: ", ")
+        let pending = names.dropFirst(failedIndex + 1).joined(separator: ", ")
+        return RemoteFileError(message: error.localizedDescription + "\n\n"
+            + localizedFormat("Failed (may be partially completed): %@", names[failedIndex])
+            + (completed.isEmpty ? "" : "\n" + localizedFormat("Completed: %@", completed))
+            + (pending.isEmpty ? "" : "\n" + localizedFormat("Not started: %@", pending)))
+    }
+
+    private nonisolated static func checkRemotePermissions(_ requests: [FilePermissionPreflight.Request], profile: ServerProfile, password: String?) -> Result<Void, RemoteFileError> {
+        guard !requests.isEmpty else { return .success(()) }
+        let askPass = SSHAskPassSession(password: password)
+        defer { askPass?.stop() }
+        let result = runProcess(
+            executablePath: "/usr/bin/ssh",
+            arguments: SSHCommandBuilder.remoteCommandArguments(for: profile, command: "sh -s", allowPassword: password != nil),
+            environment: remoteProcessEnvironment(askPassSession: askPass),
+            input: FilePermissionPreflight.remoteCommand(requests),
+            timeoutMessage: localized("Permission check timed out"),
+            overallTimeout: 60
+        )
+        let outcome: FilePermissionPreflight.Outcome
+        let detail: String
+        switch result {
+        case .success(let output):
+            if output.terminationStatus == 255 {
+                return .failure(RemoteFileError(message: output.errorText.isEmpty ? localized("Permission check connection failed") : output.errorText))
+            }
+            outcome = FilePermissionPreflight.parseRemoteOutput(output.outputText, status: output.terminationStatus)
+            detail = output.errorText
+        case .failure(let error):
+            return .failure(error)
+        }
+        switch outcome {
+        case .allowed: return .success(())
+        case .denied(let issues): return .failure(RemoteFileError(message: FilePermissionPreflight.message(issues)))
+        case .unavailable:
+            // All file work runs off the main thread. Wait only for the explicit
+            // decision when a restricted server cannot perform read-only checks.
+            let proceed = DispatchQueue.main.sync {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = localized("Unable to Verify Permissions")
+                alert.informativeText = profile.displayName + "\n" + localized("The server could not verify access. Attempt the operation anyway?") + "\n\n" + String(detail.prefix(1200))
+                alert.addButton(withTitle: localized("Cancel"))
+                alert.addButton(withTitle: localized("Attempt Operation"))
+                return alert.runModal() == .alertSecondButtonReturn
+            }
+            return proceed ? .success(()) : .failure(RemoteFileError(message: localized("Permission check cancelled. No files were changed.")))
+        }
     }
 
     private nonisolated static func recursiveDeleteCommands(for directory: String, profile: ServerProfile, password: String?) -> Result<[String], RemoteFileError> {
@@ -2209,8 +2376,8 @@ final class RemoteFileStore: ObservableObject {
         let inputPipe = input.map { _ in Pipe() }
         let output = Pipe()
         let errorPipe = Pipe()
-        let outputCollector = RemoteProcessOutputCollector(outputHandler: outputHandler)
-        let errorCollector = RemoteProcessOutputCollector(outputHandler: outputHandler)
+        let outputCollector = ProcessOutputCollector(outputHandler: outputHandler)
+        let errorCollector = ProcessOutputCollector(outputHandler: outputHandler)
 
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
@@ -2219,30 +2386,44 @@ final class RemoteFileStore: ObservableObject {
         process.standardOutput = output
         process.standardError = errorPipe
 
+        defer {
+            outputCollector.stop(readingFrom: output.fileHandleForReading)
+            errorCollector.stop(readingFrom: errorPipe.fileHandleForReading)
+            try? inputPipe?.fileHandleForWriting.close()
+        }
+
         do {
             try process.run()
-            outputCollector.start(readingFrom: output.fileHandleForReading)
-            errorCollector.start(readingFrom: errorPipe.fileHandleForReading)
+            try? inputPipe?.fileHandleForReading.close()
+            try? output.fileHandleForWriting.close()
+            try? errorPipe.fileHandleForWriting.close()
+            try outputCollector.start(readingFrom: output.fileHandleForReading)
+            try errorCollector.start(readingFrom: errorPipe.fileHandleForReading)
 
             if let input, let inputPipe {
-                inputPipe.fileHandleForWriting.write(Data(input.utf8))
+                try ProcessPipeWriter.write(Data(input.utf8), to: inputPipe.fileHandleForWriting.fileDescriptor, timeout: overallTimeout ?? 20)
                 try? inputPipe.fileHandleForWriting.close()
             }
 
             guard waitForProcess(process, timeout: overallTimeout) else {
+                processLogger.error("File subprocess timed out: \(executablePath, privacy: .public)")
                 outputCollector.stop(readingFrom: output.fileHandleForReading)
                 errorCollector.stop(readingFrom: errorPipe.fileHandleForReading)
                 return .failure(RemoteFileError(message: timeoutMessage))
             }
 
+            processLogger.info("File subprocess \(executablePath, privacy: .public) exited: \(process.terminationStatus)")
+
             return .success(
                 RemoteSubprocessResult(
-                    outputText: outputCollector.finish(readingFrom: output.fileHandleForReading),
-                    errorText: errorCollector.finish(readingFrom: errorPipe.fileHandleForReading),
+                    outputText: try outputCollector.finish(readingFrom: output.fileHandleForReading),
+                    errorText: try errorCollector.finish(readingFrom: errorPipe.fileHandleForReading),
                     terminationStatus: process.terminationStatus
                 )
             )
         } catch {
+            processLogger.error("File subprocess failed: \(executablePath, privacy: .public), error \((error as NSError).code)")
+            if process.isRunning { _ = waitForProcess(process, timeout: 0) }
             outputCollector.stop(readingFrom: output.fileHandleForReading)
             errorCollector.stop(readingFrom: errorPipe.fileHandleForReading)
             try? inputPipe?.fileHandleForWriting.close()
@@ -2358,131 +2539,6 @@ final class RemoteFileStore: ObservableObject {
         return false
     }
 
-    private nonisolated static func loadDirectoryPlain(profile: ServerProfile, path: String, password: String?) -> Result<[RemoteFileItem], RemoteFileError> {
-        let result = runSFTPProcess(
-            input: sftpListCommands(for: path, decorated: false),
-            profile: profile,
-            password: password,
-            timeoutMessage: localized("SFTP list timed out")
-        )
-
-        switch result {
-        case .success(let subprocessResult):
-            guard subprocessResult.terminationStatus == 0 else {
-                let message = subprocessResult.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
-                return .failure(RemoteFileError(message: message.isEmpty ? "SFTP list failed" : message))
-            }
-
-            return .success(parseListing(subprocessResult.outputText, basePath: path))
-        case .failure(let error):
-            return .failure(error)
-        }
-    }
-
-    private nonisolated static func parseListing(_ output: String, basePath: String) -> [RemoteFileItem] {
-        let detailedItems = output
-            .split(separator: "\n")
-            .compactMap { parseLongListingLine(String($0), basePath: basePath) }
-            .sorted { lhs, rhs in
-                if lhs.isDirectory != rhs.isDirectory {
-                    return lhs.isDirectory && !rhs.isDirectory
-                }
-                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-            }
-
-        if !detailedItems.isEmpty {
-            return detailedItems
-        }
-
-        return output
-            .split(separator: "\n")
-            .compactMap { parseSimpleLine(String($0), basePath: basePath) }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-    }
-
-    private nonisolated static func parseLongListingLine(_ line: String, basePath: String) -> RemoteFileItem? {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              !trimmed.hasPrefix("sftp>"),
-              !trimmed.hasPrefix("Connected to "),
-              let permissions = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first,
-              permissions.count >= 10 else {
-            return nil
-        }
-
-        guard let type = permissions.first,
-              type == "d" || type == "-" || type == "l" else {
-            return nil
-        }
-
-        guard let name = filenameFromLongListing(trimmed) else {
-            return nil
-        }
-
-        let displayName = name
-            .components(separatedBy: " -> ")
-            .first?
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? name
-
-        guard displayName != "." && displayName != ".." else {
-            return nil
-        }
-
-        return RemoteFileItem(
-            name: displayName,
-            path: joined(basePath, displayName),
-            isDirectory: type == "d"
-        )
-    }
-
-    private nonisolated static func filenameFromLongListing(_ line: String) -> String? {
-        let parts = line.split(separator: " ", omittingEmptySubsequences: true)
-        guard parts.count >= 9 else {
-            return nil
-        }
-
-        return parts.dropFirst(8).joined(separator: " ")
-    }
-
-    private nonisolated static func parseSimpleLine(_ line: String, basePath: String) -> RemoteFileItem? {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              !trimmed.hasPrefix("sftp>"),
-              !trimmed.hasPrefix("Connected to "),
-              !trimmed.hasPrefix("Fetching "),
-              !trimmed.hasPrefix("Changing "),
-              !looksLikePermissionString(trimmed),
-              trimmed != "." && trimmed != ".." else {
-            return nil
-        }
-
-        let isDirectory = trimmed.hasSuffix("/")
-        let name = trimmed
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/*@=|"))
-            .components(separatedBy: " -> ")
-            .first ?? trimmed
-
-        return RemoteFileItem(
-            name: name,
-            path: joined(basePath, name),
-            isDirectory: isDirectory
-        )
-    }
-
-    private nonisolated static func looksLikePermissionString(_ value: String) -> Bool {
-        guard value.count >= 10 else {
-            return false
-        }
-
-        let prefix = String(value.prefix(10))
-        guard let first = prefix.first,
-              ["d", "-", "l", "c", "b", "s", "p"].contains(first) else {
-            return false
-        }
-
-        return prefix.dropFirst().allSatisfy { ["r", "w", "x", "s", "S", "t", "T", "-"].contains($0) }
-    }
-
     private nonisolated static func joined(_ base: String, _ child: String) -> String {
         if base == "/" {
             return "/\(child)"
@@ -2500,7 +2556,7 @@ final class RemoteFileStore: ObservableObject {
 
         let parts = path.split(separator: "/").map(String.init)
         guard parts.count > 1 else {
-            return "."
+            return path.hasPrefix("/") ? "/" : "."
         }
 
         if path.hasPrefix("/") {
@@ -2522,8 +2578,8 @@ final class RemoteFileStore: ObservableObject {
         return trimmed
     }
 
-    private nonisolated static func sftpListCommands(for path: String, decorated: Bool = true) -> String {
-        let lsCommand = decorated ? "ls -la" : "ls -1 -a"
+    private nonisolated static func sftpListCommands(for path: String) -> String {
+        let lsCommand = "ls -an"
 
         if path == "." || path == "~" || path.isEmpty {
             return """
@@ -2867,7 +2923,6 @@ final class RemoteFileStore: ObservableObject {
 struct RemoteFolderBrowser: View {
     @StateObject private var store: RemoteFileStore
     @AppStorage("supportedTextFilePatterns") private var supportedTextFilePatterns = AppPreferenceDefaults.supportedTextFilePatterns
-    @State private var isDropTarget = false
     let availableProfiles: [ServerProfile]
     let collapseAction: () -> Void
     let editAction: (RemoteFileItem) -> Void
@@ -2911,66 +2966,8 @@ struct RemoteFolderBrowser: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if store.isCreatingFolder(in: store.currentPath) {
-                        NewFolderTreeRow(parentPath: store.currentPath, depth: 0, store: store)
-                    }
-
-                    ForEach(store.visibleItems(store.items)) { item in
-                        RemoteFileTreeRow(
-                            item: item,
-                            depth: 0,
-                            store: store,
-                            availableProfiles: availableProfiles,
-                            supportedTextFilePatterns: supportedTextFilePatterns,
-                            editAction: editAction
-                        )
-                    }
-                }
-                .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(isDropTarget ? Color.accentColor.opacity(0.14) : Color.clear)
-                )
-            }
-            .background(
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        store.clearSelection()
-                    }
-            )
-            .onDrop(of: RemoteFileStore.acceptedDropTypes, isTargeted: $isDropTarget) { providers in
-                store.handleDropProviders(providers, to: store.currentPath)
-            }
-            .onExitCommand {
-                store.clearSelection()
-            }
-            .contextMenu {
-                Button {
-                    store.newFolder(in: store.currentPath)
-                } label: {
-                    Label("New Folder...", systemImage: "folder.badge.plus")
-                }
-
-                Button {
-                    store.paste(to: store.currentPath)
-                } label: {
-                    Label("Paste", systemImage: "doc.on.clipboard")
-                }
-                .disabled(!store.hasCopiedItems)
-
-                Divider()
-
-                Button {
-                    store.chooseAndUpload(to: store.currentPath)
-                } label: {
-                    Label("Upload Here...", systemImage: "arrow.up.circle")
-                }
-                .disabled(store.hasMultipleSelection)
-            }
+            RemoteFileOutlineView(store: store, availableProfiles: availableProfiles,
+                                  supportedTextFilePatterns: supportedTextFilePatterns, editAction: editAction)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(store.status)
@@ -2986,641 +2983,11 @@ struct RemoteFolderBrowser: View {
             }
             .padding(10)
         }
-        .frame(minWidth: 220)
-        .background(EscapeKeyHandler(action: store.clearSelection))
+        .frame(minWidth: 180)
         .task {
             store.refresh()
             await store.refreshAfterDelay(seconds: 3)
             await store.refreshAfterDelay(seconds: 7)
         }
-    }
-}
-
-private struct EscapeKeyHandler: NSViewRepresentable {
-    let action: () -> Void
-
-    func makeNSView(context: Context) -> EscapeKeyHandlerView {
-        let view = EscapeKeyHandlerView()
-        view.action = action
-        return view
-    }
-
-    func updateNSView(_ nsView: EscapeKeyHandlerView, context: Context) {
-        nsView.action = action
-    }
-}
-
-private final class EscapeKeyHandlerView: NSView {
-    var action: () -> Void = {}
-    private var monitor: Any?
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        installMonitorIfNeeded()
-    }
-
-    deinit {
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
-        }
-    }
-
-    private func installMonitorIfNeeded() {
-        guard monitor == nil else {
-            return
-        }
-
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self else {
-                return event
-            }
-
-            if event.keyCode == 53, self.window?.isKeyWindow == true {
-                self.action()
-            }
-
-            return event
-        }
-    }
-}
-
-private struct RowClickCaptureView: NSViewRepresentable {
-    struct Click {
-        let modifierFlags: NSEvent.ModifierFlags
-        let clickCount: Int
-    }
-
-    let action: (Click) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(action: action)
-    }
-
-    func makeNSView(context: Context) -> RowClickCaptureNSView {
-        let view = RowClickCaptureNSView()
-        context.coordinator.view = view
-        context.coordinator.installMonitorsIfNeeded()
-        return view
-    }
-
-    func updateNSView(_ nsView: RowClickCaptureNSView, context: Context) {
-        context.coordinator.view = nsView
-        context.coordinator.action = action
-        context.coordinator.installMonitorsIfNeeded()
-    }
-
-    final class Coordinator {
-        var action: (Click) -> Void
-        weak var view: RowClickCaptureNSView?
-        private var mouseDownMonitor: Any?
-        private var mouseUpMonitor: Any?
-        private var mouseDownLocation: NSPoint?
-        private var mouseDownModifierFlags: NSEvent.ModifierFlags = []
-
-        init(action: @escaping (Click) -> Void) {
-            self.action = action
-        }
-
-        func installMonitorsIfNeeded() {
-            guard mouseDownMonitor == nil, mouseUpMonitor == nil else {
-                return
-            }
-
-            mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-                self?.handleMouseDown(event)
-                return event
-            }
-            mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
-                self?.handleMouseUp(event)
-                return event
-            }
-        }
-
-        private func handleMouseDown(_ event: NSEvent) {
-            guard contains(event) else {
-                mouseDownLocation = nil
-                return
-            }
-
-            mouseDownLocation = event.locationInWindow
-            mouseDownModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        }
-
-        private func handleMouseUp(_ event: NSEvent) {
-            guard let mouseDownLocation else {
-                return
-            }
-
-            defer {
-                self.mouseDownLocation = nil
-            }
-
-            let distance = hypot(event.locationInWindow.x - mouseDownLocation.x, event.locationInWindow.y - mouseDownLocation.y)
-            guard distance <= 4, contains(event) else {
-                return
-            }
-
-            action(
-                Click(
-                    modifierFlags: mouseDownModifierFlags,
-                    clickCount: event.clickCount
-                )
-            )
-        }
-
-        private func contains(_ event: NSEvent) -> Bool {
-            guard let view,
-                  event.window === view.window else {
-                return false
-            }
-
-            let location = view.convert(event.locationInWindow, from: nil)
-            return view.bounds.contains(location)
-        }
-
-        deinit {
-            if let mouseDownMonitor {
-                NSEvent.removeMonitor(mouseDownMonitor)
-            }
-            if let mouseUpMonitor {
-                NSEvent.removeMonitor(mouseUpMonitor)
-            }
-        }
-    }
-}
-
-private final class RowClickCaptureNSView: NSView {
-    override var acceptsFirstResponder: Bool {
-        false
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
-    }
-}
-
-private struct LocalFileDropTarget: NSViewRepresentable {
-    @Binding var isTargeted: Bool
-    let action: ([URL]) -> Void
-    let remoteAction: () -> Bool
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(isTargeted: $isTargeted, action: action, remoteAction: remoteAction)
-    }
-
-    func makeNSView(context: Context) -> LocalFileDropTargetView {
-        let view = LocalFileDropTargetView()
-        view.coordinator = context.coordinator
-        view.registerForDraggedTypes([.fileURL, NSPasteboard.PasteboardType(UTType.item.identifier)])
-        return view
-    }
-
-    func updateNSView(_ nsView: LocalFileDropTargetView, context: Context) {
-        context.coordinator.isTargeted = $isTargeted
-        context.coordinator.action = action
-        context.coordinator.remoteAction = remoteAction
-        nsView.coordinator = context.coordinator
-    }
-
-    final class Coordinator {
-        var isTargeted: Binding<Bool>
-        var action: ([URL]) -> Void
-        var remoteAction: () -> Bool
-
-        init(isTargeted: Binding<Bool>, action: @escaping ([URL]) -> Void, remoteAction: @escaping () -> Bool) {
-            self.isTargeted = isTargeted
-            self.action = action
-            self.remoteAction = remoteAction
-        }
-    }
-}
-
-private final class LocalFileDropTargetView: NSView {
-    weak var coordinator: LocalFileDropTarget.Coordinator?
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        switch NSApp.currentEvent?.type {
-        case .leftMouseDragged, .leftMouseUp:
-            return self
-        default:
-            return nil
-        }
-    }
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if isInternalRemoteDrag(sender) {
-            coordinator?.isTargeted.wrappedValue = true
-            return .move
-        }
-
-        guard !localFileURLs(from: sender).isEmpty else {
-            return []
-        }
-
-        coordinator?.isTargeted.wrappedValue = true
-        return .copy
-    }
-
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if isInternalRemoteDrag(sender) {
-            return .move
-        }
-
-        return localFileURLs(from: sender).isEmpty ? NSDragOperation() : .copy
-    }
-
-    override func draggingExited(_ sender: NSDraggingInfo?) {
-        coordinator?.isTargeted.wrappedValue = false
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        if isInternalRemoteDrag(sender) {
-            coordinator?.isTargeted.wrappedValue = false
-            return coordinator?.remoteAction() ?? false
-        }
-
-        let urls = localFileURLs(from: sender)
-        coordinator?.isTargeted.wrappedValue = false
-        guard !urls.isEmpty else {
-            return false
-        }
-
-        coordinator?.action(urls)
-        return true
-    }
-
-    override func concludeDragOperation(_ sender: NSDraggingInfo?) {
-        coordinator?.isTargeted.wrappedValue = false
-    }
-
-    private func localFileURLs(from sender: NSDraggingInfo) -> [URL] {
-        let pasteboard = sender.draggingPasteboard
-        let options: [NSPasteboard.ReadingOptionKey: Any] = [
-            .urlReadingFileURLsOnly: true
-        ]
-
-        let objects = pasteboard.readObjects(forClasses: [NSURL.self], options: options) ?? []
-        return objects.compactMap { object in
-            (object as? URL) ?? (object as? NSURL).map { $0 as URL }
-        }
-    }
-
-    private func isInternalRemoteDrag(_ sender: NSDraggingInfo) -> Bool {
-        sender.draggingSource != nil && AppDragRegistry.activeRemoteFilePayload != nil
-    }
-}
-
-private struct RemoteFileTreeRow: View {
-    let item: RemoteFileItem
-    let depth: Int
-    @ObservedObject var store: RemoteFileStore
-    let availableProfiles: [ServerProfile]
-    let supportedTextFilePatterns: String
-    let editAction: (RemoteFileItem) -> Void
-    @State private var isHovering = false
-    @State private var isDropTarget = false
-    @State private var isRenaming = false
-    @State private var editedName = ""
-    @FocusState private var renameFieldFocused: Bool
-
-    private var uploadTarget: String {
-        store.uploadTarget(for: item)
-    }
-
-    private var isEditableTextFile: Bool {
-        AppPreferences.isTextEditableFile(item, patternsValue: supportedTextFilePatterns)
-    }
-
-    private var itemIconName: String {
-        if item.isDirectory {
-            return "folder.fill"
-        }
-
-        return isEditableTextFile ? "doc.text" : "doc"
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                if item.isDirectory {
-                    Image(systemName: store.isExpanded(item) ? "chevron.down" : "chevron.right")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 10)
-                } else {
-                    Color.clear
-                        .frame(width: 10, height: 10)
-                }
-
-                Image(systemName: itemIconName)
-                    .foregroundStyle(item.isDirectory ? .blue : .secondary)
-                    .frame(width: 16)
-                    .opacity(item.isHidden ? 0.58 : 1)
-
-                if isRenaming {
-                    TextField("", text: $editedName)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .frame(minHeight: 20)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color(nsColor: .textBackgroundColor))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(Color.accentColor, lineWidth: renameFieldFocused ? 1.5 : 1)
-                        )
-                        .focused($renameFieldFocused)
-                        .onSubmit {
-                            commitRename()
-                        }
-                        .onExitCommand {
-                            cancelRename()
-                        }
-                } else {
-                    Text(item.name)
-                        .font(.system(size: 12))
-                        .lineLimit(1)
-                        .foregroundStyle(item.isHidden ? .secondary : .primary)
-                        .opacity(item.isHidden ? 0.72 : 1)
-                }
-
-                Spacer(minLength: 0)
-
-                if store.isUploading(to: uploadTarget) {
-                    Image(systemName: "arrow.up.circle")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 12)
-                } else if store.isDownloading(item) {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 12)
-                } else if store.isMoving(item) {
-                    Image(systemName: "arrow.right.circle")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 12)
-                } else if store.isLoading(item) {
-                    Image(systemName: "hourglass")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 12)
-                }
-            }
-            .padding(.leading, CGFloat(depth) * 14 + 8)
-            .padding(.trailing, 8)
-            .padding(.vertical, 3)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(rowBackgroundColor)
-            )
-            .padding(.horizontal, 4)
-            .onHover { hovering in
-                isHovering = hovering
-            }
-            .background(
-                RowClickCaptureView { click in
-                    handleRowClick(click)
-                }
-            )
-            .onDrag {
-                store.dragItemProvider(for: item)
-            }
-            .onDrop(of: RemoteFileStore.acceptedDropTypes, isTargeted: $isDropTarget) { providers in
-                store.handleDropProviders(providers, to: uploadTarget)
-            }
-            .overlay(
-                LocalFileDropTarget(isTargeted: $isDropTarget) { urls in
-                    store.uploadDroppedURLs(urls, to: uploadTarget)
-                } remoteAction: {
-                    store.handleActiveRemoteFileDrop(to: uploadTarget)
-                }
-            )
-            .contextMenu {
-                if isEditableTextFile {
-                    Button {
-                        editAction(item)
-                    } label: {
-                        Label("Edit", systemImage: "square.and.pencil")
-                    }
-                    .disabled(store.actionItems(for: item).count > 1)
-
-                    Divider()
-                }
-
-                Button {
-                    store.copy(item)
-                } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
-                }
-
-                Button {
-                    store.paste(to: uploadTarget)
-                } label: {
-                    Label("Paste", systemImage: "doc.on.clipboard")
-                }
-                .disabled(!store.hasCopiedItems)
-
-                Button {
-                    store.newFolder(in: uploadTarget)
-                } label: {
-                    Label("New Folder...", systemImage: "folder.badge.plus")
-                }
-
-                Divider()
-
-                Button {
-                    store.chooseAndUpload(to: uploadTarget)
-                } label: {
-                    Label(item.isDirectory ? "Upload Here..." : "Upload...", systemImage: "arrow.up.circle")
-                }
-                .disabled(store.actionItems(for: item).count > 1)
-
-                Button {
-                    store.download(item)
-                } label: {
-                    Label("Download...", systemImage: "arrow.down.circle")
-                }
-
-                let targetProfiles = store.serverTransferTargets(from: availableProfiles)
-                if !targetProfiles.isEmpty {
-                    Menu {
-                        ForEach(targetProfiles) { targetProfile in
-                            Button {
-                                store.copyToServer(item, targetProfile: targetProfile)
-                            } label: {
-                                Text(targetProfile.displayName)
-                            }
-                        }
-                    } label: {
-                        Label("Copy to Server...", systemImage: "server.rack")
-                    }
-                }
-
-                Button {
-                    beginRename()
-                } label: {
-                    Label("Rename...", systemImage: "pencil")
-                }
-                .disabled(store.actionItems(for: item).count > 1)
-
-                Button(role: .destructive) {
-                    store.delete(item)
-                } label: {
-                    Label("Delete...", systemImage: "trash")
-                }
-
-                if item.isDirectory {
-                    Button(store.isExpanded(item) ? "Collapse" : "Expand") {
-                        store.open(item)
-                    }
-                }
-            }
-            .onChange(of: isRenaming) { _, renaming in
-                guard renaming else {
-                    return
-                }
-
-                DispatchQueue.main.async {
-                    renameFieldFocused = true
-                }
-            }
-
-            if item.isDirectory, store.isExpanded(item) {
-                if store.isCreatingFolder(in: item.path) {
-                    NewFolderTreeRow(parentPath: item.path, depth: depth + 1, store: store)
-                }
-
-                ForEach(store.children(for: item)) { child in
-                    RemoteFileTreeRow(
-                        item: child,
-                        depth: depth + 1,
-                        store: store,
-                        availableProfiles: availableProfiles,
-                        supportedTextFilePatterns: supportedTextFilePatterns,
-                        editAction: editAction
-                    )
-                }
-            }
-        }
-    }
-
-    private func handleRowClick(_ click: RowClickCaptureView.Click) {
-        guard !isRenaming else {
-            return
-        }
-
-        if click.clickCount >= 2 {
-            guard item.isDirectory || isEditableTextFile else {
-                return
-            }
-
-            store.select(item, extending: false)
-            editAction(item)
-            return
-        }
-
-        let isExtendingSelection = click.modifierFlags.contains(.command)
-        store.select(item, extending: isExtendingSelection)
-        if !isExtendingSelection {
-            store.open(item)
-        }
-    }
-
-    private var rowBackgroundColor: Color {
-        if isDropTarget {
-            return Color.accentColor.opacity(0.24)
-        }
-
-        if store.isSelected(item) {
-            return Color.accentColor.opacity(0.28)
-        }
-
-        if isHovering {
-            return Color.primary.opacity(0.08)
-        }
-
-        return .clear
-    }
-
-    private func beginRename() {
-        editedName = item.name
-        isRenaming = true
-    }
-
-    private func commitRename() {
-        if store.rename(item, to: editedName) {
-            isRenaming = false
-        }
-    }
-
-    private func cancelRename() {
-        editedName = item.name
-        isRenaming = false
-    }
-}
-
-private struct NewFolderTreeRow: View {
-    let parentPath: String
-    let depth: Int
-    @ObservedObject var store: RemoteFileStore
-    @State private var folderName = "Untitled Folder"
-    @FocusState private var fieldFocused: Bool
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Color.clear
-                .frame(width: 10, height: 10)
-
-            Image(systemName: "folder.fill")
-                .foregroundStyle(.blue)
-                .frame(width: 16)
-
-            TextField("", text: $folderName)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .frame(minHeight: 20)
-                .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color(nsColor: .textBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4)
-                        .stroke(Color.accentColor, lineWidth: fieldFocused ? 1.5 : 1)
-                )
-                .focused($fieldFocused)
-                .onSubmit {
-                    commit()
-                }
-                .onExitCommand {
-                    store.cancelNewFolder()
-                }
-
-            Spacer(minLength: 0)
-        }
-        .padding(.leading, CGFloat(depth) * 14 + 8)
-        .padding(.trailing, 8)
-        .padding(.vertical, 3)
-        .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(Color.accentColor.opacity(0.10))
-        )
-        .padding(.horizontal, 4)
-        .onAppear {
-            DispatchQueue.main.async {
-                fieldFocused = true
-            }
-        }
-    }
-
-    private func commit() {
-        _ = store.createFolder(named: folderName, in: parentPath)
     }
 }

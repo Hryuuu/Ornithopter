@@ -61,20 +61,16 @@ enum SSHCommandBuilder {
     }
 
     nonisolated static func sftpArguments(for profile: ServerProfile, allowPassword: Bool = false) -> [String] {
-        var arguments: [String] = ["-o", "ConnectTimeout=5"]
-        if !allowPassword {
-            arguments.append(contentsOf: ["-b", "-", "-o", "BatchMode=yes"])
-        }
+        // Batch commands must stop on failure with either authentication method.
+        // Askpass supplies passwords without an interactive SFTP command loop.
+        var arguments: [String] = ["-o", "BatchMode=no", "-b", "-", "-o", "ConnectTimeout=5"]
         appendSFTPOptions(for: profile, to: &arguments)
         arguments.append(profile.destination)
         return arguments
     }
 
     nonisolated static func remoteCommandArguments(for profile: ServerProfile, command: String, allowPassword: Bool = false) -> [String] {
-        var arguments: [String] = ["-o", "ConnectTimeout=5"]
-        if !allowPassword {
-            arguments.append(contentsOf: ["-o", "BatchMode=yes"])
-        }
+        var arguments: [String] = ["-o", "ConnectTimeout=5", "-o", "BatchMode=no"]
         appendSSHOptions(for: profile, to: &arguments)
         arguments.append(profile.destination)
         arguments.append(command)
@@ -82,10 +78,7 @@ enum SSHCommandBuilder {
     }
 
     nonisolated static func rsyncRemoteShell(for profile: ServerProfile, allowPassword: Bool = false) -> String {
-        var parts = ["ssh", "-o", "ConnectTimeout=5"]
-        if !allowPassword {
-            parts.append(contentsOf: ["-o", "BatchMode=yes"])
-        }
+        var parts = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=no"]
         appendCommonOptions(for: profile, portOption: "-p", to: &parts)
         return parts.joined(separator: " ")
     }

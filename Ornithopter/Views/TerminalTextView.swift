@@ -5,6 +5,7 @@
 
 import AppKit
 import Darwin
+import OSLog
 import SwiftUI
 
 #if canImport(SwiftTerm)
@@ -12,6 +13,8 @@ import SwiftTerm
 #endif
 
 final class TerminalSessionRuntime {
+    private static let logger = Logger(subsystem: "kucc.co.kr.Ornithopter", category: "TerminalSession")
+    private var generation = UUID()
 #if canImport(SwiftTerm)
     fileprivate var terminalView: LocalProcessTerminalView?
     fileprivate var coordinator: TerminalTextView.Coordinator?
@@ -56,8 +59,11 @@ final class TerminalSessionRuntime {
         }
         isClosed = true
         isClosing = true
+        generation = UUID()
+        coordinator?.stopMonitoring()
         stopTerminationPoller()
         stopAskPassSession()
+        (terminalView as? OrnithopterTerminalView)?.onFocus = nil
         terminalView?.terminate()
         terminalView?.removeFromSuperview()
         terminalView = nil
@@ -72,8 +78,11 @@ final class TerminalSessionRuntime {
         }
         isClosed = true
         isClosing = true
+        generation = UUID()
+        coordinator?.stopMonitoring()
         stopTerminationPoller()
         stopAskPassSession()
+        (terminalView as? OrnithopterTerminalView)?.onFocus = nil
         terminalView?.send(Array("exit\n".utf8))
 
         let viewToTerminate = terminalView
@@ -135,6 +144,8 @@ final class TerminalSessionRuntime {
         }
 
         didStart = true
+        generation = UUID()
+        Self.logger.info("Starting SSH session \(self.generation)")
         didReceiveTermination = false
         nonRunningPollCount = 0
         notifyRunningChanged(true)
@@ -155,8 +166,10 @@ final class TerminalSessionRuntime {
             return
         }
 
+        let generation = generation
         DispatchQueue.main.async { [weak self] in
-            self?.onTitleChanged?(String(cleanTitle.prefix(40)))
+            guard let self, self.generation == generation, !self.isClosed else { return }
+            self.onTitleChanged?(String(cleanTitle.prefix(40)))
         }
     }
 
@@ -166,6 +179,7 @@ final class TerminalSessionRuntime {
         }
 
         didReceiveTermination = true
+        Self.logger.info("SSH session \(self.generation) terminated, status \(exitCode ?? -1)")
         stopTerminationPoller()
         stopAskPassSession()
         notifyRunningChanged(false)
@@ -183,20 +197,26 @@ final class TerminalSessionRuntime {
     }
 
     private func notifyRunningChanged(_ running: Bool) {
+        let generation = generation
         DispatchQueue.main.async { [weak self] in
-            self?.onRunningChanged?(running)
+            guard let self, self.generation == generation, !self.isClosed else { return }
+            self.onRunningChanged?(running)
         }
     }
 
     private func notifyUnexpectedExit(_ status: Int32) {
+        let generation = generation
         DispatchQueue.main.async { [weak self] in
-            self?.onUnexpectedExit?(status)
+            guard let self, self.generation == generation, !self.isClosed else { return }
+            self.onUnexpectedExit?(status)
         }
     }
 
     private func notifyNormalExit() {
+        let generation = generation
         DispatchQueue.main.async { [weak self] in
-            self?.onNormalExit?()
+            guard let self, self.generation == generation, !self.isClosed else { return }
+            self.onNormalExit?()
         }
     }
 
@@ -241,30 +261,11 @@ final class TerminalSessionRuntime {
         }
 
         nonRunningPollCount += 1
-        if let status = reapExitStatusIfAvailable(pid: process.shellPid) {
-            processTerminated(exitCode: status)
-        } else if nonRunningPollCount >= 4 {
-            processTerminated(exitCode: 0)
+        // SwiftTerm owns waitpid. Reaping here races its process monitor and can
+        // turn a failed connection into an apparent successful exit.
+        if nonRunningPollCount >= 4 {
+            processTerminated(exitCode: nil)
         }
-    }
-
-    private func reapExitStatusIfAvailable(pid: pid_t) -> Int32? {
-        guard pid > 0 else {
-            return nil
-        }
-
-        var status: Int32 = 0
-        let result = waitpid(pid, &status, WNOHANG)
-        guard result == pid else {
-            return nil
-        }
-
-        let signal = status & 0x7f
-        if signal == 0 {
-            return (status >> 8) & 0xff
-        }
-
-        return 128 + signal
     }
 #endif
 }
@@ -277,17 +278,51 @@ private final class TerminalRuntimeProcessDelegate: NSObject, LocalProcessTermin
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
 
     func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
+        guard runtime?.terminalView === source else { return }
         runtime?.setTerminalTitle(title)
     }
 
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {
-        runtime?.processTerminated(exitCode: exitCode)
+        guard runtime?.terminalView === source else { return }
+        // The pinned SwiftTerm LocalProcess reports the raw waitpid status.
+        let status = exitCode.map { raw in
+            raw & 0x7f == 0 ? (raw >> 8) & 0xff : 128 + (raw & 0x7f)
+        }
+        runtime?.processTerminated(exitCode: status)
     }
 }
 
 final class OrnithopterTerminalView: LocalProcessTerminalView {
+    var onFocus: (() -> Void)?
+    private var selectedForInput = false
+    private var needsSelectionFocus = false
+
+    func updateInputSelection(_ selected: Bool) {
+        if selected && !selectedForInput { needsSelectionFocus = true }
+        selectedForInput = selected
+        if !selected { needsSelectionFocus = false }
+        focusSelectionIfNeeded()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if selectedForInput { needsSelectionFocus = true }
+        DispatchQueue.main.async { [weak self] in self?.focusSelectionIfNeeded() }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onFocus?()
+        super.mouseDown(with: event)
+    }
+
+    private func focusSelectionIfNeeded() {
+        guard needsSelectionFocus, selectedForInput, let window else { return }
+        // Set this window's responder only on selection/attachment, not on every
+        // SwiftUI refresh (which can steal focus from file search or a dialog).
+        if window.makeFirstResponder(self) { needsSelectionFocus = false }
+    }
     private static let clearScrollbackSequence: [UInt8] = [0x1b, 0x5b, 0x33, 0x4a]
     private static let trackedCommandLengthLimit = 512
 
@@ -433,6 +468,7 @@ struct TerminalTextView: NSViewRepresentable {
     let onNormalExit: () -> Void
     let onUnexpectedExit: (Int32) -> Void
     let onTitleChanged: (String) -> Void
+    var onFocus: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         attachTerminal(context: context)
@@ -440,13 +476,10 @@ struct TerminalTextView: NSViewRepresentable {
 
     func updateNSView(_ terminalView: LocalProcessTerminalView, context: Context) {
         updateTerminal(terminalView, context: context)
-
-        if isActive, terminalView.window?.firstResponder !== terminalView {
-            terminalView.window?.makeFirstResponder(terminalView)
-        }
     }
 
     static func dismantleNSView(_ terminalView: LocalProcessTerminalView, coordinator: Coordinator) {
+        coordinator.stopMonitoring()
         // The terminal view is owned by TerminalSessionRuntime. SwiftUI can dismantle
         // this wrapper during tab moves or split changes; do not tear down the live
         // terminal unless the session itself is closed.
@@ -476,6 +509,10 @@ struct TerminalTextView: NSViewRepresentable {
 
     private func updateTerminal(_ terminalView: LocalProcessTerminalView, context: Context) {
         let coordinator = context.coordinator
+        if runtime.coordinator !== coordinator { runtime.coordinator?.stopMonitoring() }
+        coordinator.isActive = isActive
+        (terminalView as? OrnithopterTerminalView)?.onFocus = onFocus
+        (terminalView as? OrnithopterTerminalView)?.updateInputSelection(isActive)
         runtime.coordinator = coordinator
         coordinator.profile = profile
         coordinator.sessionPassword = sessionPassword
@@ -521,6 +558,7 @@ struct TerminalTextView: NSViewRepresentable {
         var startupCommand: String?
         private weak var terminalView: LocalProcessTerminalView?
         private var keyMonitor: Any?
+        var isActive = false
 
         init(
             profile: ServerProfile,
@@ -562,7 +600,7 @@ struct TerminalTextView: NSViewRepresentable {
 
         private func trackTerminalCommandInput(_ event: NSEvent) {
             guard let terminalView,
-                  terminalView.window?.firstResponder === terminalView,
+                  ownsInput(event),
                   let ornithopterTerminalView = terminalView as? OrnithopterTerminalView else {
                 return
             }
@@ -572,7 +610,7 @@ struct TerminalTextView: NSViewRepresentable {
 
         private func sendControlShortcutIfNeeded(_ event: NSEvent) -> Bool {
             guard let terminalView,
-                  terminalView.window?.firstResponder === terminalView else {
+                  ownsInput(event) else {
                 return false
             }
 
@@ -586,6 +624,17 @@ struct TerminalTextView: NSViewRepresentable {
 
             terminalView.send([byte])
             return true
+        }
+
+        private func ownsInput(_ event: NSEvent) -> Bool {
+            guard let terminalView else { return false }
+            return TerminalInputRouting.owns(event, view: terminalView, isActive: isActive)
+        }
+
+        func stopMonitoring() {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            keyMonitor = nil
+            terminalView = nil
         }
 
         private func controlByte(for event: NSEvent) -> UInt8? {
@@ -645,6 +694,7 @@ struct TerminalTextView: View {
     let onNormalExit: () -> Void
     let onUnexpectedExit: (Int32) -> Void
     let onTitleChanged: (String) -> Void
+    var onFocus: (() -> Void)? = nil
 
     var body: some View {
         ContentUnavailableView {
