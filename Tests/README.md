@@ -10,8 +10,9 @@ zsh Tests/run-explorer-regressions.sh
 The explorer suite uses a local SFTP subprocess and injected directory responses;
 no saved server profiles or credentials are used. It covers filename/type parsing,
 stale responses, link resolution, native selection and double-click actions,
-10,000-row virtualization, resizing, and file promises. AppKit tests need a macOS
-WindowServer session. The click fixture uses an off-screen window with a simulated
+inline folder/rename input, draft and text-selection preservation across reloads,
+name validation and cancellation, 10,000-row virtualization, resizing, and file
+promises. AppKit tests need a macOS WindowServer session. The click fixture uses an off-screen window with a simulated
 key-window state; it does not activate the app or move the pointer.
 
 A restricted process sandbox can prevent the SSH fixture and NSItemProvider from

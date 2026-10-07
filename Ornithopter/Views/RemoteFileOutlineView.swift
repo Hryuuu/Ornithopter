@@ -79,6 +79,7 @@ struct RemoteFileOutlineView: NSViewRepresentable {
         private var lastExpanded: Set<String> = []
         private(set) var editingNode: Node?
         private weak var editingField: NSTextField?
+        private var editingSelection: NSRange?
         private var drafts: [String: String] = [:]
         private var menuActions: [() -> Void] = []
         private var dragProvider: RemoteFilePromiseProvider?
@@ -108,6 +109,10 @@ struct RemoteFileOutlineView: NSViewRepresentable {
             defer { syncing = false }
             let treeChanged = revision != store.treeRevision
             if treeChanged {
+                if let editingNode, let editor = editingField?.currentEditor() {
+                    drafts[editingNode.path] = editor.string
+                    editingSelection = editor.selectedRange
+                }
                 let oldRoot = rootPath
                 let oldListings = listings
                 let oldNewFolder = newFolderParent
@@ -312,6 +317,7 @@ struct RemoteFileOutlineView: NSViewRepresentable {
 
         private func beginEditing(_ node: Node) {
             guard let outline else { return }
+            if editingNode === node, editingField?.currentEditor() != nil { return }
             if editingNode !== node { cancelEditing() }
             let row = outline.row(forItem: node)
             guard row >= 0 else { return }
@@ -323,26 +329,40 @@ struct RemoteFileOutlineView: NSViewRepresentable {
             editingField = field
             field.isEditable = true
             field.isSelectable = true
-            outline.window?.makeFirstResponder(field)
-            field.selectText(nil)
+            guard outline.window?.makeFirstResponder(field) == true,
+                  let editor = field.currentEditor() else { return }
+            // selectText starts another editing session and ends the first one,
+            // which our delegate interprets as cancellation. Select in place.
+            let name = editor.string as NSString
+            let length = name.length
+            // For files, leave the final extension intact when typing a new name.
+            // Dotfiles without an extension and directory names stay fully selected.
+            let initialLength = node.item?.isBrowsableDirectory == false && !name.pathExtension.isEmpty
+                ? (name.deletingPathExtension as NSString).length : length
+            let selection = editingSelection ?? NSRange(location: 0, length: initialLength)
+            let location = min(selection.location, length)
+            editor.selectedRange = NSRange(location: location, length: min(selection.length, length - location))
         }
 
         private func cancelEditing() {
             let wasNew = editingNode?.newFolderParent != nil
             let node = editingNode
+            let field = editingField
             editingNode = nil
-            editingField?.abortEditing()
-            editingField?.isEditable = false
-            editingField?.isSelectable = false
+            editingField = nil
+            editingSelection = nil
+            field?.abortEditing()
+            field?.isEditable = false
+            field?.isSelectable = false
             if let node {
                 drafts.removeValue(forKey: node.path)
-                editingField?.stringValue = node.item?.name ?? NSLocalizedString("Untitled Folder", comment: "Default name for a new remote folder")
+                field?.stringValue = node.item?.name ?? NSLocalizedString("Untitled Folder", comment: "Default name for a new remote folder")
             }
-            editingField = nil
             if wasNew && store.newFolderParent == node?.newFolderParent { store.cancelNewFolder() }
         }
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            guard control === editingField else { return false }
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) { cancelEditing(); return true }
             guard commandSelector == #selector(NSResponder.insertNewline(_:)), let node = editingNode,
                   let field = editingField else { return false }
@@ -359,6 +379,7 @@ struct RemoteFileOutlineView: NSViewRepresentable {
                 // A new folder's placeholder remains until the request finishes.
                 editingNode = nil
                 editingField = nil
+                editingSelection = nil
                 field.isEditable = false
                 field.isSelectable = false
                 outline?.window?.makeFirstResponder(outline)
@@ -367,11 +388,18 @@ struct RemoteFileOutlineView: NSViewRepresentable {
         }
 
         func controlTextDidChange(_ obj: Notification) {
-            if let node = editingNode, let field = editingField { drafts[node.path] = field.stringValue }
+            guard let field = editingField, obj.object as? NSTextField === field,
+                  let node = editingNode else { return }
+            drafts[node.path] = field.stringValue
         }
 
         func controlTextDidEndEditing(_ obj: Notification) {
-            if !syncing && editingNode != nil { cancelEditing() }
+            guard let field = editingField, obj.object as? NSTextField === field else { return }
+            if syncing {
+                editingField = nil
+            } else if editingNode != nil {
+                cancelEditing()
+            }
         }
 
         func editPlaceholder(at row: Int) -> Bool {

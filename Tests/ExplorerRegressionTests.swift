@@ -41,6 +41,7 @@ struct ExplorerRegressionTests {
         try await testLinks()
         try await testLinkConcurrency()
         try await testOutline()
+        try await testInlineEditing()
         print("Checking file promises...")
         try await testFilePromises()
         print("PASS: \(checks) explorer regression checks")
@@ -275,6 +276,192 @@ struct ExplorerRegressionTests {
 
     final class InputTestWindow: NSWindow {
         override var isKeyWindow: Bool { true }
+    }
+
+    nonisolated final class EditingDirectoryLoader: @unchecked Sendable {
+        private let lock = NSLock()
+        private var listings: [String: [RemoteFileItem]]
+        private var delayChildListing = true
+        let childListingReady = DispatchSemaphore(value: 0)
+
+        init(_ listings: [String: [RemoteFileItem]]) { self.listings = listings }
+
+        func setRoot(_ items: [RemoteFileItem]) {
+            lock.lock(); defer { lock.unlock() }
+            listings["."] = items
+        }
+
+        func load(_ path: String) -> Result<[RemoteFileItem], Error> {
+            lock.lock()
+            let items = listings[path] ?? []
+            let shouldWait = path == "folder" && delayChildListing
+            if shouldWait { delayChildListing = false }
+            lock.unlock()
+            if shouldWait { childListingReady.wait() }
+            return .success(items)
+        }
+    }
+
+    static func waitFor(_ message: String, condition: () -> Bool) async throws {
+        for _ in 0..<200 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        expect(condition(), message)
+    }
+
+    static func testInlineEditing() async throws {
+        _ = NSApplication.shared
+        let file = RemoteFileItem(name: "before.txt", path: "before.txt", isDirectory: false)
+        let sibling = RemoteFileItem(name: "existing.txt", path: "existing.txt", isDirectory: false)
+        let folder = RemoteFileItem(name: "folder", path: "folder", isDirectory: true)
+        let child = RemoteFileItem(name: "child.txt", path: "folder/child.txt", isDirectory: false)
+        let rootItems = [folder, file, sibling]
+        let loader = EditingDirectoryLoader([".": rootItems, "folder": [child]])
+        defer { loader.childListingReady.signal() }
+        let store = RemoteFileStore(profile: ServerProfile(name: "fixture", host: "fixture.invalid", username: "fixture"), sessionPassword: nil,
+                                    directoryLoader: { loader.load($0) })
+        let view = RemoteFileOutlineView(store: store, availableProfiles: [], supportedTextFilePatterns: "*.txt", editAction: { _ in })
+        let host = NSHostingView(rootView: view)
+        let window = InputTestWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 300, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        host.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
+        window.orderFront(nil)
+        defer { window.orderOut(nil); window.contentView = nil }
+        store.refresh()
+        try await waitFor("Initial editing fixture loads") { !store.items.isEmpty && store.loadingPaths.isEmpty }
+        layout(host)
+        guard let outline = descendants(host).compactMap({ $0 as? FileOutlineView }).first,
+              let coordinator = outline.coordinator else { preconditionFailure("Editing fixture has an outline") }
+
+        func row(for path: String) -> Int {
+            (0..<outline.numberOfRows).first { (outline.item(atRow: $0) as? RemoteFileOutlineView.Node)?.path == path } ?? -1
+        }
+        func menu(_ title: String, at path: String? = nil) {
+            let menu = coordinator.contextMenu(at: path.map { row(for: $0) } ?? -1)!
+            let index = menu.items.firstIndex { $0.title == NSLocalizedString(title, comment: "") }!
+            expect(menu.items[index].isEnabled, "Editing menu action is enabled: \(title)")
+            menu.performActionForItem(at: index)
+        }
+        func editor() -> NSTextView {
+            guard let node = coordinator.editingNode,
+                  let cell = outline.view(atColumn: 0, row: outline.row(forItem: node), makeIfNecessary: true) as? NSTableCellView,
+                  let field = cell.textField, let editor = field.currentEditor() as? NSTextView else {
+                preconditionFailure("Inline editing owns a field editor")
+            }
+            expect(field.isEditable && editor.isEditable && window.firstResponder === editor, "Inline field accepts keyboard input")
+            return editor
+        }
+        func replaceName(_ value: String) {
+            let editor = editor()
+            editor.insertText(value, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+            expect(editor.string == value, "Actual field editor accepts \(value)")
+        }
+        func command(_ selector: Selector) { editor().doCommand(by: selector) }
+        func refresh(_ items: [RemoteFileItem]) async throws {
+            loader.setRoot(items)
+            store.refresh()
+            try await waitFor("Refreshed editing fixture loads") { store.loadingPaths.isEmpty }
+            layout(host)
+            // Let the representable's deferred editor restoration run as well.
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(20))
+            layout(host)
+        }
+
+        menu("Rename...", at: file.path)
+        expect(coordinator.editingNode?.path == file.path, "Rename stays active after the menu action")
+        expect(editor().selectedRange() == NSRange(location: 0, length: "before".utf16.count), "Rename selects the basename without its extension")
+        editor().insertText("새 이름 🪽", replacementRange: NSRange(location: NSNotFound, length: 0))
+        expect(editor().string == "새 이름 🪽.txt", "Typing replaces the selected basename and preserves the extension")
+        command(#selector(NSResponder.cancelOperation(_:)))
+        menu("Rename...", at: file.path)
+        command(#selector(NSResponder.deleteBackward(_:)))
+        expect(editor().string == ".txt", "Backspace deletes only the selected basename")
+        replaceName("새 이름 🪽.txt")
+        let selection = NSRange(location: 1, length: 2)
+        editor().setSelectedRange(selection)
+        coordinator.update(view)
+        expect(editor().string == "새 이름 🪽.txt" && editor().selectedRange() == selection, "Ordinary updates preserve input and selection")
+
+        let extra = RemoteFileItem(name: "added.txt", path: "added.txt", isDirectory: false)
+        try await refresh([extra] + rootItems)
+        expect(editor().string == "새 이름 🪽.txt" && editor().selectedRange() == selection, "Reloading and moving the edited row preserves its draft and selection")
+
+        let staleField = NSTextField(string: "stale")
+        coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: staleField))
+        coordinator.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: staleField))
+        expect(!coordinator.control(staleField, textView: editor(), doCommandBy: #selector(NSResponder.cancelOperation(_:))), "Commands from another field cannot cancel the current edit")
+        expect(coordinator.editingNode?.path == file.path && editor().string == "새 이름 🪽.txt", "Stale field notifications leave the current edit intact")
+
+        replaceName("")
+        command(#selector(NSResponder.insertNewline(_:)))
+        expect(coordinator.editingNode != nil && store.status == NSLocalizedString("Name cannot be empty.", comment: ""), "Enter with an empty name keeps editing and reports validation")
+        replaceName(sibling.name)
+        command(#selector(NSResponder.insertNewline(_:)))
+        expect(coordinator.editingNode != nil && store.status.contains(sibling.name), "Enter with a duplicate name keeps editing")
+        replaceName(file.name)
+        command(#selector(NSResponder.insertNewline(_:)))
+        expect(coordinator.editingNode == nil && window.firstResponder === outline, "Enter with an unchanged name completes editing without a remote request")
+
+        menu("Rename...", at: file.path)
+        replaceName("cancelled.txt")
+        command(#selector(NSResponder.cancelOperation(_:)))
+        let restoredField = (outline.view(atColumn: 0, row: row(for: file.path), makeIfNecessary: true) as? NSTableCellView)?.textField
+        expect(coordinator.editingNode == nil && restoredField?.stringValue == file.name, "Escape restores the original filename")
+
+        menu("New Folder...")
+        try await waitFor("New folder starts editing") { coordinator.editingNode?.newFolderParent == "." }
+        expect(store.newFolderParent == "." && outline.numberOfRows == 5, "New folder placeholder survives opening the editor")
+        replaceName("새 폴더 🪽")
+        editor().setSelectedRange(selection)
+        try await refresh(rootItems)
+        expect(store.newFolderParent == "." && editor().string == "새 폴더 🪽" && editor().selectedRange() == selection, "New folder draft and selection survive a root reload")
+        replaceName("")
+        command(#selector(NSResponder.insertNewline(_:)))
+        expect(store.newFolderParent == "." && coordinator.editingNode != nil, "Invalid folder name does not remove its input row")
+        replaceName(sibling.name)
+        command(#selector(NSResponder.insertNewline(_:)))
+        expect(store.newFolderParent == "." && coordinator.editingNode != nil, "Duplicate folder name remains editable")
+        command(#selector(NSResponder.cancelOperation(_:)))
+        expect(store.newFolderParent == nil && coordinator.editingNode == nil, "Escape removes the uncommitted folder")
+        coordinator.update(view)
+
+        menu("New Folder...", at: folder.path)
+        try await waitFor("Nested placeholder starts editing before its listing arrives") { coordinator.editingNode?.newFolderParent == folder.path }
+        replaceName("하위 폴더")
+        editor().setSelectedRange(selection)
+        loader.childListingReady.signal()
+        try await waitFor("Delayed child listing completes") { store.loadingPaths.isEmpty }
+        layout(host)
+        try await Task.sleep(for: .milliseconds(20))
+        expect(editor().string == "하위 폴더" && editor().selectedRange() == selection, "Delayed child listing preserves the nested folder draft")
+        // A real focus transfer still means cancellation, unlike internal reloads.
+        window.makeFirstResponder(outline)
+        expect(coordinator.editingNode == nil && store.newFolderParent == nil, "Leaving the folder field cancels the draft")
+        coordinator.update(view)
+
+        menu("Rename...", at: file.path)
+        replaceName("removed.txt")
+        let removedField = (outline.view(atColumn: 0, row: row(for: file.path), makeIfNecessary: true) as? NSTableCellView)?.textField
+        try await refresh([folder, sibling])
+        expect(coordinator.editingNode == nil && removedField?.isEditable == false && removedField?.currentEditor() == nil, "Removing the edited item ends and disables its editing session")
+
+        for (name, isDirectory, selectedName) in [
+            ("README", false, "README"),
+            (".env", false, ".env"),
+            (".env.local", false, ".env"),
+            ("archive.tar.gz", false, "archive.tar"),
+            ("한글 🪽.txt", false, "한글 🪽"),
+            ("release.1", true, "release.1")
+        ] {
+            let item = RemoteFileItem(name: name, path: name, isDirectory: isDirectory)
+            try await refresh([item])
+            menu("Rename...", at: item.path)
+            expect(editor().selectedRange() == NSRange(location: 0, length: selectedName.utf16.count), "Initial rename selection respects file type and Unicode: \(name)")
+            command(#selector(NSResponder.cancelOperation(_:)))
+        }
+        print("Inline editing: focus, text input, validation, cancellation, and reload checks passed")
     }
 
     static func testOutline() async throws {
